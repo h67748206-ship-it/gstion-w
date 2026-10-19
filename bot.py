@@ -29,7 +29,7 @@ def keep_alive():
 # ==========================================
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='+', intents=intents)
-bot.remove_command('help')  # On retire l'aide par défaut pour mettre la nôtre
+bot.remove_command('help')
 
 
 @bot.event
@@ -153,10 +153,9 @@ async def note(ctx, member: discord.Member = None, *, text=None):
   await ctx.send("Note ajoutée.")
 
 
-@bot.command(name="note")
-async def note_sub(ctx, action=None, note_id=None):
-  if action == "delete":
-    await ctx.send(f"Note {note_id} supprimée.")
+@bot.command(name="delnote")
+async def note_delete(ctx, note_id=None):
+  await ctx.send(f"Note {note_id} supprimée.")
 
 
 @bot.command()
