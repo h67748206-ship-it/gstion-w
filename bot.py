@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 from flask import Flask
 import discord
@@ -27,10 +28,42 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='+', intents=intents)
 bot.remove_command('help')
 
+# Paramètres globaux (Anti-link, etc.)
+config = {
+    "antilink": False
+}
+
 @bot.event
 async def on_ready():
     print(f'Connecté en tant que {bot.user.name} (ID: {bot.user.id})')
     print('Le bot gstion est prêt et opérationnel !')
+
+# ==========================================
+#          ÉCOUTEUR D'ÉVÉNEMENTS (ANTI-LINK)
+# ==========================================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    # Détection des liens si l'anti-link est activé
+    if config["antilink"]:
+        # Regex pour repérer les URL et liens d'invitation Discord
+        link_regex = r"(https?://[^\s]+|discord\.gg/[^\s]+|discord\.com/invite/[^\s]+)"
+        if re.search(link_regex, message.content, re.IGNORECASE):
+            # Vérifie si l'auteur est administrateur / owner pour ne pas le bloquer
+            if not message.author.guild_permissions.administrator:
+                try:
+                    await message.delete()
+                    await message.channel.send(
+                        f"⚠️ {message.author.mention}, les liens ne sont pas autorisés sur ce serveur !",
+                        delete_after=5
+                    )
+                    return
+                except discord.Forbidden:
+                    pass
+
+    await bot.process_commands(message)
 
 # ==========================================
 #          COMMANDES PUBLIQUES
@@ -341,15 +374,27 @@ async def unhideall(ctx):
 
 @bot.command()
 async def settings(ctx):
-    await ctx.send("Paramètres du bot...")
+    status_antilink = "Activé" if config["antilink"] else "Désactivé"
+    await ctx.send(f"⚙️ **Paramètres actuels :**\n- Anti-link : `{status_antilink}`")
 
 @bot.command()
 async def antispam(ctx, status=None):
     await ctx.send(f"Anti-spam : {status}")
 
 @bot.command()
-async def antilink(ctx, status=None):
-    await ctx.send(f"Anti-lien : {status}")
+async def antilink(ctx, status: str = None):
+    if not status:
+        current = "activé" if config["antilink"] else "désactivé"
+        return await ctx.send(f"L'anti-link est actuellement **{current}**. Utilisez `+antilink on` ou `+antilink off`.")
+    
+    if status.lower() in ["on", "enable", "1", "true"]:
+        config["antilink"] = True
+        await ctx.send("✅ **Anti-link activé** ! Tous les liens seront automatiquement supprimés.")
+    elif status.lower() in ["off", "disable", "0", "false"]:
+        config["antilink"] = False
+        await ctx.send("❌ **Anti-link désactivé**.")
+    else:
+        await ctx.send("Usage : `+antilink on` ou `+antilink off`.")
 
 @bot.command()
 async def badwords(ctx, action=None):
@@ -405,23 +450,4 @@ async def helpall(ctx):
     embed.add_field(name="⛔ Perm 9", value="`+bl`, `+unbl`, `+blinfo`", inline=False)
     embed.add_field(
         name="⚙️ Owners",
-        value="`+cmute`, `+tempcmute`, `+uncmute`, `+mutelist`, `+unmuteall`, `+lock`, `+unlock`, `+lockall`, `+unlockall`, `+hide`, `+unhide`, `+hideall`, `+unhideall`, `+settings`, `+antispam`, `+antilink`, `+badwords`, `+allbots`, `+alladmins`, `+boosters`, `+serverinfo`",
-        inline=False
-    )
-    embed.set_footer(text="Bot gstion • Préfixe : +")
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def help(ctx):
-    await ctx.send("Menu d'aide principal de gstion (`+help`). Tapez `+helpall` pour la liste complète.")
-
-# ==========================================
-#            LANCEMENT DU BOT
-# ==========================================
-if __name__ == "__main__":
-    keep_alive()
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        print("ERREUR : La variable d'environnement DISCORD_TOKEN n'a pas été trouvée sur Render !")
-    else:
-        bot.run(token)
+        value="`+cmute`, `+tempcmute`, `+uncmute`, `+mutelist`, `+unmuteall`, `+lock`, `+unlock`, `+lockall`, `+unlockall`, `+hide`, `+unhide`, `+hideall`, `+unhideall`, `+settings`, `+antispam`, `+antilink`, `+badwords`, `+allbots`, `+alladmins`, `+boosters
