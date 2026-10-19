@@ -65,7 +65,7 @@ recent_msgs: dict = {}     # (guild, user) -> [(contenu, timestamp)] pour doublo
 # ============================================================
 CATEGORIES = {
     "moderation": {
-        "label": "Modération", "emoji": "🛡️",
+        "label": "Modération", "emoji": "<a:M_SYnitro:1561699280174055434>",
         "description": "Sanctions et modération des membres",
         "commands": [
             ("sanctions <membre>", "Affiche les sanctions reçues par un membre"),
@@ -94,21 +94,21 @@ CATEGORIES = {
         ],
     },
     "configuration": {
-        "label": "Configuration du serveur", "emoji": "⚙️",
+        "label": "Configuration du serveur", "emoji": "<:1550556335995883560:1561699282082471948>",
         "description": "Permissions et réglages du serveur",
         "commands": [
             ("perms", "Affiche les rôles ayant des permissions sensibles sur le serveur"),
         ],
     },
     "gestion": {
-        "label": "Gestion du serveur", "emoji": "🧰",
+        "label": "Gestion du serveur", "emoji": "<:xcx:1561699277842157624>",
         "description": "Outils de gestion vocale et serveur",
         "commands": [
             ("voicekick <membre>", "Déconnecte un membre de son salon vocal actuel"),
         ],
     },
     "antiraid": {
-        "label": "Antiraid", "emoji": "🚨",
+        "label": "Antiraid", "emoji": "<:lock:1561379416414879777>",
         "description": "Protection anti-raid et blacklist rank",
         "commands": [
             ("antiraid", "Affiche l'état des modules : antiphish, salon piège, doublons"),
@@ -123,7 +123,7 @@ CATEGORIES = {
         ],
     },
     "controle": {
-        "label": "Contrôle du bot", "emoji": "🤖",
+        "label": "Contrôle du bot", "emoji": "<:Crown:1561379407195545641>",
         "description": "Gestion globale du bot (propriétaires)",
         "commands": [
             ("bl <membre> <raison>", "Ajoute quelqu'un à la blacklist, il sera banni de tous les serveurs du bot"),
@@ -133,7 +133,7 @@ CATEGORIES = {
         ],
     },
     "utilitaire": {
-        "label": "Utilitaire", "emoji": "🧩",
+        "label": "Utilitaire", "emoji": "<:1462041546160472095:1561379419178672158>",
         "description": "Outils divers : avatars, emojis, recherches",
         "commands": [
             ("pic [membre]", "Permet de récupérer la photo de profil de quelqu'un"),
