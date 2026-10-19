@@ -89,7 +89,7 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_update(before, after):
-    # System de rôle Soutien / Tag / Boost / Statut
+    # Système de rôle Soutien / Tag / Boost / Statut
     if config["soutien_role"] and config["soutien_text"]:
         role = after.guild.get_role(config["soutien_role"])
         if not role:
@@ -243,24 +243,40 @@ async def lb_(ctx, category=None):
 async def wiki(ctx, *, query=None):
     if not query:
         return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier un sujet à chercher (ex: `+wiki France`).")
+
     try:
+        wikipedia.set_lang("fr")
+        wikipedia.set_user_agent("GstionBot/1.0 (https://discord.gg/)")
+
         search_results = wikipedia.search(query)
         if not search_results:
-            return await ctx.send(f"{EMOJI_XCX} Aucun article trouvé sur Wikipédia pour cette recherche.")
-        
+            return await ctx.send(f"{EMOJI_XCX} Aucun article trouvé sur Wikipédia pour `{query}`.")
+
         target_title = search_results[0]
         summary = wikipedia.summary(target_title, sentences=3, auto_suggest=False)
         page = wikipedia.page(target_title, auto_suggest=False)
-        
-        embed = discord.Embed(title=f"📚 Wikipédia : {page.title}", description=summary, color=discord.Color.green())
+
+        embed = discord.Embed(
+            title=f"📚 Wikipédia : {page.title}",
+            description=summary if len(summary) < 2000 else summary[:1990] + "...",
+            color=discord.Color.green()
+        )
         embed.add_field(name="Lien complet", value=f"[Lire l'article]({page.url})")
         await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"{EMOJI_XCX} Impossible de récupérer les données sur Wikipédia pour ce sujet.")
+
+    except wikipedia.exceptions.DisambiguationError as e:
+        options = ", ".join([f"`{opt}`" for opt in e.options[:5]])
+        await ctx.send(f"⚠️ Votre recherche est trop vague. Essayez parmi : {options}")
+
+    except wikipedia.exceptions.PageError:
+        await ctx.send(f"{EMOJI_XCX} La page Wikipédia demandée n'a pas pu être chargée.")
+
+    except Exception:
+        await ctx.send(f"{EMOJI_XCX} Une erreur est survenue lors de la recherche Wikipédia.")
 
 @bot.command(name="search", help="Recherche une page Wikipédia (`+search wiki <sujet>`).")
 async def search_(ctx, engine=None, *, query=None):
-    if engine == "wiki" and query:
+    if engine and engine.lower() == "wiki" and query:
         await wiki(ctx, query=query)
     else:
         await ctx.send("Usage : `+search wiki <votre recherche>`")
@@ -562,7 +578,18 @@ async def unhideall(ctx):
 async def settings(ctx):
     status_antilink = "Activé" if config["antilink"] else "Désactivé"
     status_antispam = "Activé" if config["antispam"] else "Désactivé"
-    await ctx.send(f"⚙️ **Configuration Actuelle :**\n- Anti-link : `{status_antilink}`\n- Anti-spam : `{status_antispam}`\n- Salon d'accueil : <#{config['welcome_channel']}>\n- Auto Role : <@&{config['auto_role']}>\n- Tag/Statut Soutien : `{config['soutien_text']}`")
+    welcome = f"<#{config['welcome_channel']}>" if config['welcome_channel'] else "Non configuré"
+    autorole = f"<@&{config['auto_role']}>" if config['auto_role'] else "Non configuré"
+    soutien = f"`{config['soutien_text']}`" if config['soutien_text'] else "Non configuré"
+    
+    await ctx.send(
+        f"⚙️ **Configuration Actuelle :**\n"
+        f"- Anti-link : `{status_antilink}`\n"
+        f"- Anti-spam : `{status_antispam}`\n"
+        f"- Salon d'accueil : {welcome}\n"
+        f"- Auto Role : {autorole}\n"
+        f"- Tag/Statut Soutien : {soutien}"
+    )
 
 @bot.command(help="Active ou désactive la sécurité Anti-spam (`+antispam on/off`).")
 async def antispam(ctx, status=None):
