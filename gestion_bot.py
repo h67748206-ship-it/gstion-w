@@ -1475,11 +1475,21 @@ def start_web_server():
 # ---------------------------------------------------------------- LANCEMENT
 
 async def main():
+    print("Démarrage de gestion_bot.py...", flush=True)
+    if not TOKEN:
+        raise SystemExit("ERREUR : DISCORD_TOKEN est vide. Ajoute la variable dans Render > Environment.")
     async with bot:
-        for cog in (Configuration(), Salons(), Moderation(), Utility(), Protection(), Statistiques(), Outils(), Gestion(), ModerationAvancee(), Recherche(), Suggestions(), Antiraid(), Statut()):
+        for cog in (Configuration(), Salons(), Moderation(), Utility(), Protection(), Statistiques(), Outils(),
+                    Gestion(), ModerationAvancee(), Recherche(), Suggestions(), Antiraid(), Statut()):
             await bot.add_cog(cog)
         start_web_server()
-        await bot.start(TOKEN)
+        try:
+            await bot.start(TOKEN)
+        except discord.PrivilegedIntentsRequired:
+            raise SystemExit("ERREUR : active 'Server Members Intent' et 'Message Content Intent' dans le portail "
+                             "développeur Discord (Bot > Privileged Gateway Intents).")
+        except discord.LoginFailure:
+            raise SystemExit("ERREUR : token Discord invalide. Vérifie DISCORD_TOKEN dans Render.")
 
 
 if __name__ == "__main__":
