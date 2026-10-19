@@ -1236,41 +1236,76 @@ class Antiraid(commands.Cog, name="Antiraid & antihack"):
 
 # ---------------------------------------------------------------- AIDE
 
+INTRO = ("*Les paramètres peuvent être des noms, des mentions ou des IDs.\n"
+         "Si ce ne sont pas des mentions, ils doivent être séparés par `, `.*")
+
+
+def help_footer():
+    name = bot.user.name if bot.user else "Gestion Bot"
+    return f"{name} • Préfixe actuel : {PREFIX}"
+
+
+def command_block(c):
+    sig = f" {c.signature}" if c.signature else ""
+    return f"**`{PREFIX}{c.name}{sig}`**\n{c.short_doc or 'Pas de description'}"
+
+
+async def send_category(ctx, title, cmds, color=discord.Color.blurple()):
+    """Envoie la liste des commandes au format embed, découpée si elle est trop longue."""
+    chunks, current = [], ""
+    for c in cmds:
+        block = command_block(c) + "\n\n"
+        if len(current) + len(block) > 3500:
+            chunks.append(current)
+            current = ""
+        current += block
+    if current:
+        chunks.append(current)
+    for i, body in enumerate(chunks):
+        intro = INTRO + "\n\n" if i == 0 else ""
+        embed = discord.Embed(title=title if i == 0 else f"{title} (suite)",
+                              description=(intro + body).rstrip(), color=color)
+        embed.set_footer(text=help_footer())
+        await ctx.send(embed=embed)
+
+
 @bot.command(name="help")
 async def help_cmd(ctx, *, sujet: str = None):
     """Affiche la liste des commandes. +help <catégorie> ou +help <commande>."""
     if sujet is None:
         embed = discord.Embed(
-            title="📖 Aide du bot",
-            description=f"Préfixe : `{PREFIX}`\nTape `{PREFIX}help <catégorie>` pour le détail.",
+            title="📖 Aide",
+            description=INTRO + f"\n\nTape `{PREFIX}help <catégorie>` pour le détail d'une catégorie.",
             color=discord.Color.blurple(),
         )
         for name, cog in bot.cogs.items():
             cmds = [c for c in cog.get_commands() if not c.hidden]
             if cmds:
+                value = " · ".join(f"`{PREFIX}{c.name}`" for c in cmds)
                 embed.add_field(
-                    name=f"{CATEGORY_EMOJIS.get(cog.qualified_name, '📁')} {cog.qualified_name} ({len(cmds)})",
-                    value=", ".join(f"`{PREFIX}{c.name}`" for c in cmds),
+                    name=f"{CATEGORY_EMOJIS.get(name, '📁')} {name} ({len(cmds)})",
+                    value=value[:1000],
                     inline=False,
                 )
+        embed.set_footer(text=help_footer())
         return await ctx.send(embed=embed)
 
     for name, cog in bot.cogs.items():
         if name.lower() == sujet.lower() or name.lower().endswith(sujet.lower()):
-            lines = [f"`{PREFIX}{c.name}` - {c.short_doc or 'Pas de description'}"
-                     for c in cog.get_commands() if not c.hidden]
-            embed = discord.Embed(title=f"{CATEGORY_EMOJIS.get(name, '📁')} {name}",
-                                  description="\n".join(lines), color=discord.Color.blurple())
-            return await ctx.send(embed=embed)
+            cmds = [c for c in cog.get_commands() if not c.hidden]
+            return await send_category(ctx, f"{CATEGORY_EMOJIS.get(name, '📁')} {name}", cmds)
 
     cmd = bot.get_command(sujet)
     if cmd:
-        usage = f"{PREFIX}{cmd.name} {cmd.signature}".strip()
-        embed = discord.Embed(title=f"{PREFIX}{cmd.name}", description=cmd.short_doc or "-",
-                              color=discord.Color.blurple())
-        embed.add_field(name="Utilisation", value=f"`{usage}`", inline=False)
+        sig = f" {cmd.signature}" if cmd.signature else ""
+        embed = discord.Embed(
+            title=f"{CATEGORY_EMOJIS.get(cmd.cog_name, '📁')} {cmd.cog_name or 'Commande'}",
+            description=f"**`{PREFIX}{cmd.name}{sig}`**\n{cmd.short_doc or 'Pas de description'}",
+            color=discord.Color.blurple(),
+        )
         if cmd.aliases:
-            embed.add_field(name="Alias", value=", ".join(f"`{PREFIX}{a}`" for a in cmd.aliases))
+            embed.add_field(name="Alias", value=" · ".join(f"`{PREFIX}{a}`" for a in cmd.aliases))
+        embed.set_footer(text=help_footer())
         return await ctx.send(embed=embed)
 
     await ctx.send(f"❌ Aucune catégorie ni commande « {sujet} ». Tape `{PREFIX}help`.")
