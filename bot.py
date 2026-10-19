@@ -196,10 +196,20 @@ async def ping(ctx):
 async def speed(ctx):
     await ctx.send(f"⚡ Vitesse du serveur : `{round(bot.latency * 1000)}ms` {EMOJI_NITRO}")
 
-@bot.command(help="Fait répéter un message au bot (ex: `+message Bonjour tout le monde`).")
+@bot.command(help="Fait répéter un message au bot (ex: `+message Bonjour`).")
 async def message(ctx, *, text=None):
     if not text:
         return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier le message à répéter.")
+    try:
+        await ctx.message.delete()
+    except discord.Forbidden:
+        pass
+    await ctx.send(text)
+
+@bot.command(help="Fait parler le bot à votre place (ex: `+say Bonjour`).")
+async def say(ctx, *, text=None):
+    if not text:
+        return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier le texte à dire.")
     try:
         await ctx.message.delete()
     except discord.Forbidden:
@@ -521,134 +531,89 @@ async def serverinfo(ctx):
     await ctx.send(embed=embed)
 
 # ==========================================
-#          MENU D'AIDE INTERACTIF (BOUTONS & EMBEDS)
+#          MENU D'AIDE (MENU DÉROULANT)
 # ==========================================
+class HelpSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Commandes Publiques", description="Voir les commandes publiques", emoji="🌐"),
+            discord.SelectOption(label="Perm 1 à 3", description="Voir les commandes de modération 1-3", emoji="🛡️"),
+            discord.SelectOption(label="Perm 4 à 6", description="Voir les commandes de modération 4-6", emoji="⚖️"),
+            discord.SelectOption(label="Perm 7 à 9", description="Voir les commandes de modération lourde 7-9", emoji="🔨"),
+            discord.SelectOption(label="Owners", description="Voir les commandes d'administration globale", emoji="⚙️")
+        ]
+        super().__init__(placeholder="📂 Sélectionnez une catégorie...", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.values[0] == "Commandes Publiques":
+            embed = discord.Embed(
+                title="🌐 Commandes Publiques",
+                description=(
+                    "`+crowbots` - Liste des bots publics\n"
+                    "`+mybots` - Vos bots enregistrés\n"
+                    "`+pic` - Photo de profil d'un membre\n"
+                    "`+banner` - Bannière d'un membre\n"
+                    "`+server pic/banner` - Icône ou bannière du serveur\n"
+                    "`+emoji` - Image grand format d'un emoji\n"
+                    "`+image` - Traitement d'image\n"
+                    "`+suggestion` - Soumettre une suggestion\n"
+                    "`+lb suggestions` - Classement des suggestions\n"
+                    "`+wiki` - Recherche Wikipédia rapide\n"
+                    "`+search wiki` - Recherche Wikipédia complète\n"
+                    "`+calc` - Calculatrice mathématique\n"
+                    "`+ping` - Latence du bot en ms\n"
+                    "`+speed` - Vitesse de réponse du serveur\n"
+                    "`+message` - Répéter un message\n"
+                    "`+say` - Faire parler le bot"
+                ),
+                color=discord.Color.blue()
+            )
+        elif self.values[0] == "Perm 1 à 3":
+            embed = discord.Embed(
+                title="🛡️ Commandes Perm 1 à 3",
+                description=(
+                    "**Perm 1:**\n`+sanctions`, `+note`, `+delnote`, `+mute`, `+tempmute`, `+perms`, `+snipe`\n\n"
+                    "**Perm 2:**\n`+voicekick`\n\n"
+                    "**Perm 3:**\n`+warn`, `+antihack`"
+                ),
+                color=discord.Color.green()
+            )
+        elif self.values[0] == "Perm 4 à 6":
+            embed = discord.Embed(
+                title="⚖️ Commandes Perm 4 à 6",
+                description=(
+                    "**Perm 4:**\n`+nick`\n\n"
+                    "**Perm 5:**\n`+del`, `+clear`, `+unmute`\n\n"
+                    "**Perm 6:**\n`+addrole`, `+delrole`"
+                ),
+                color=discord.Color.orange()
+            )
+        elif self.values[0] == "Perm 7 à 9":
+            embed = discord.Embed(
+                title="🔨 Commandes Perm 7 à 9",
+                description=(
+                    "**Perm 7:**\n`+clearsanctions`, `+kick`, `+banlist`\n\n"
+                    "**Perm 8:**\n`+ban`, `+tempban`, `+unban`, `+derank`, `+lockname`, `+unlockname`, `+locknamelist`, `+blrank`\n\n"
+                    "**Perm 9:**\n`+bl`, `+unbl`, `+blinfo`"
+                ),
+                color=discord.Color.red()
+            )
+        elif self.values[0] == "Owners":
+            embed = discord.Embed(
+                title="⚙️ Commandes Owners",
+                description=(
+                    "`+cmute`, `+tempcmute`, `+uncmute`, `+mutelist`, `+unmuteall`, `+lock`, `+unlock`, `+lockall`, `+unlockall`, `+hide`, `+unhide`, `+hideall`, `+unhideall`, `+settings`, `+antispam`, `+antilink`, `+badwords`, `+allbots`, `+alladmins`, `+boosters`, `+serverinfo`"
+                ),
+                color=discord.Color.gold()
+            )
+        await interaction.response.edit_message(embed=embed)
+
 class HelpView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=180)
+        self.add_item(HelpSelect())
 
-    @discord.ui.button(label="Public", style=discord.ButtonStyle.primary, emoji="🌐")
-    async def public_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="🌐 Commandes Publiques",
-            description=(
-                "`+crowbots` - Liste des bots publics\n"
-                "`+mybots` - Vos bots enregistrés\n"
-                "`+pic` - Photo de profil d'un membre\n"
-                "`+banner` - Bannière d'un membre\n"
-                "`+server pic/banner` - Icône ou bannière du serveur\n"
-                "`+emoji` - Image grand format d'un emoji\n"
-                "`+image` - Traitement d'image\n"
-                "`+suggestion` - Soumettre une suggestion\n"
-                "`+lb suggestions` - Classement des suggestions\n"
-                "`+wiki` - Recherche Wikipédia rapide\n"
-                "`+search wiki` - Recherche Wikipédia complète\n"
-                "`+calc` - Calculatrice mathématique\n"
-                "`+ping` - Latence du bot en ms\n"
-                "`+speed` - Vitesse de réponse du serveur\n"
-                "`+message` - Répéter un message"
-            ),
-            color=discord.Color.blue()
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="Perm 1-3", style=discord.ButtonStyle.secondary, emoji="🛡️")
-    async def perm1_3_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="🛡️ Commandes Perm 1 à 3",
-            description=(
-                "**Perm 1:**\n"
-                "`+sanctions` - Historique des sanctions\n"
-                "`+note` - Ajouter une note\n"
-                "`+delnote` - Supprimer une note\n"
-                "`+mute` - Muter un membre\n"
-                "`+tempmute` - Muter temporairement\n"
-                "`+perms` - Permissions d'un membre\n"
-                "`+snipe` - Récupérer le dernier message supprimé\n\n"
-                "**Perm 2:**\n"
-                "`+voicekick` - Expulser d'un salon vocal\n\n"
-                "**Perm 3:**\n"
-                "`+warn` - Avertir un membre\n"
-                "`+antihack` - Configuration anti-hack"
-            ),
-            color=discord.Color.green()
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="Perm 4-6", style=discord.ButtonStyle.secondary, emoji="⚖️")
-    async def perm4_6_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="⚖️ Commandes Perm 4 à 6",
-            description=(
-                "**Perm 4:**\n"
-                "`+nick` - Changer le surnom d'un membre\n\n"
-                "**Perm 5:**\n"
-                "`+del` - Supprimer une sanction\n"
-                "`+clear` - Purger les messages d'un salon\n"
-                "`+unmute` - Démuter un membre\n\n"
-                "**Perm 6:**\n"
-                "`+addrole` - Ajouter un rôle\n"
-                "`+delrole` - Retirer un rôle"
-            ),
-            color=discord.Color.orange()
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="Perm 7-9", style=discord.ButtonStyle.danger, emoji="🔨")
-    async def perm7_9_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="🔨 Commandes Perm 7 à 9",
-            description=(
-                "**Perm 7:**\n"
-                "`+clearsanctions` - Effacer toutes les sanctions\n"
-                "`+kick` - Expulser un membre\n"
-                "`+banlist` - Liste des bannis\n\n"
-                "**Perm 8:**\n"
-                "`+ban` - Bannir un membre\n"
-                "`+tempban` - Bannir temporairement\n"
-                "`+unban` - Débannir un membre\n"
-                "`+derank` - Retirer les rôles de modération\n"
-                "`+lockname` - Verrouiller le nom\n"
-                "`+unlockname` - Déverrouiller le nom\n"
-                "`+locknamelist` - Liste des noms verrouillés\n"
-                "`+blrank` - Rang de blacklist\n\n"
-                "**Perm 9:**\n"
-                "`+bl` - Ajouter à la Blacklist\n"
-                "`+unbl` - Retirer de la Blacklist\n"
-                "`+blinfo` - Infos de blacklist"
-            ),
-            color=discord.Color.red()
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    @discord.ui.button(label="Owners", style=discord.ButtonStyle.success, emoji="⚙️")
-    async def owners_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = discord.Embed(
-            title="⚙️ Commandes Owners",
-            description=(
-                "`+cmute` - Muter le salon courant\n"
-                "`+tempcmute` - Muter temporairement le salon\n"
-                "`+uncmute` - Démuter le salon courant\n"
-                "`+mutelist` - Liste des membres mutés\n"
-                "`+unmuteall` - Démuter tout le monde\n"
-                "`+lock` / `+unlock` - Verrouiller/Déverrouiller le salon\n"
-                "`+lockall` / `+unlockall` - Verrouiller/Déverrouiller tous les salons\n"
-                "`+hide` / `+unhide` - Masquer/Afficher le salon\n"
-                "`+hideall` / `+unhideall` - Masquer/Afficher tous les salons\n"
-                "`+settings` - Paramètres du bot\n"
-                "`+antispam` - Configuration anti-spam\n"
-                "`+antilink` - Configuration anti-lien\n"
-                "`+badwords` - Gestion des mots interdits\n"
-                "`+allbots` - Liste de tous les bots\n"
-                "`+alladmins` - Liste de tous les administrateurs\n"
-                "`+boosters` - Liste des boosters du serveur\n"
-                "`+serverinfo` - Informations détaillées du serveur"
-            ),
-            color=discord.Color.gold()
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
-
-@bot.command(help="Affiche le menu d'aide interactif avec explications et boutons.")
+@bot.command(help="Affiche le menu d'aide interactif avec un menu déroulant.")
 async def help(ctx, *, command_name=None):
     if command_name:
         cmd = bot.get_command(command_name)
@@ -664,10 +629,10 @@ async def help(ctx, *, command_name=None):
     else:
         embed = discord.Embed(
             title=f"{EMOJI_CROWN} Menu d'aide interactif - Gstion {EMOJI_NITRO}",
-            description="Cliquez sur les boutons ci-dessous pour naviguer entre les différentes catégories de permissions et consulter la description de chaque commande.",
+            description="Utilisez le menu déroulant ci-dessous pour choisir une catégorie de commandes.",
             color=discord.Color.blue()
         )
-        embed.set_footer(text="Bot gstion • Cliquez sur les boutons ci-dessous pour changer de catégorie.")
+        embed.set_footer(text="Bot gstion • Menu dynamique.")
         await ctx.send(embed=embed, view=HelpView())
 
 # ==========================================
