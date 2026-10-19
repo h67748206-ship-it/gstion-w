@@ -21,7 +21,7 @@ PORT = int(os.getenv("PORT", "10000"))
 PREFIX = "+"
 BOT_NAME = "Mon Bot"
 EMBED_COLOR = 0x2B2D31
-OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
+OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "1535245254209577060").split(",") if x.strip().isdigit()}
 DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
 MAX_TIMEOUT = 28 * 86400  # limite Discord pour un timeout
 DANGEROUS_PERMS = (
@@ -49,6 +49,7 @@ DATA = load_data()
 for _key in ("sanctions", "notes", "blacklist", "blrank", "lockednames", "antiraid", "suggestions"):
     DATA.setdefault(_key, {})
 DATA.setdefault("tempbans", [])
+DATA.setdefault("whitelist", {})
 
 
 def save() -> None:
@@ -212,6 +213,10 @@ def is_exempt(member: discord.Member) -> bool:
     return p.administrator or p.manage_guild
 
 
+def is_whitelisted(member: discord.Member) -> bool:
+    return member.id in OWNER_IDS or member.id in DATA["whitelist"].get(str(member.guild.id), [])
+
+
 def resolve_role(guild: discord.Guild, text: str):
     text = text.strip()
     m = re.search(r"\d{15,20}", text)
@@ -367,7 +372,7 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 
     # Blacklist rank : retire les rôles interdits
     cfg = get_blrank(after.guild.id)
-    if cfg["enabled"] and after.id in cfg["members"]:
+    if cfg["enabled"] and after.id in cfg["members"] and not is_whitelisted(after):
         added = [r for r in after.roles if r not in before.roles and r != after.guild.default_role]
         for role in added:
             dangerous = any(getattr(role.permissions, p) for p in DANGEROUS_PERMS)
@@ -407,7 +412,7 @@ async def on_message_delete(message: discord.Message):
 async def antiraid_check(message: discord.Message) -> bool:
     """Retourne True si le message a été traité par l'antiraid."""
     member = message.author
-    if not isinstance(member, discord.Member) or is_exempt(member):
+    if not isinstance(member, discord.Member) or is_exempt(member) or is_whitelisted(member):
         return False
     cfg = get_antiraid(message.guild.id)
 
@@ -1058,6 +1063,37 @@ async def calc(ctx, *, expression: str):
     except (ValueError, SyntaxError, ZeroDivisionError, TypeError) as e:
         return await ctx.send(embed=err(f"Calcul impossible : {e}"))
     await ctx.send(embed=discord.Embed(title="🧮 Calcul", description=f"`{expression}` = **{result}**", color=EMBED_COLOR))
+
+
+# ============================================================
+# WHITELIST
+# ============================================================
+@bot.group(name="wl", invoke_without_command=True)
+@commands.has_permissions(administrator=True)
+async def wl(ctx):
+    ids = DATA["whitelist"].get(str(ctx.guild.id), [])
+    desc = "\n".join(f"<@{uid}>" for uid in ids) or "Aucun membre whitelisté."
+    await ctx.send(embed=footer(discord.Embed(title="✅ Whitelist", description=desc, color=EMBED_COLOR)))
+
+
+@wl.command(name="add")
+@commands.has_permissions(administrator=True)
+async def wl_add(ctx, membre: discord.Member):
+    lst = DATA["whitelist"].setdefault(str(ctx.guild.id), [])
+    if membre.id not in lst:
+        lst.append(membre.id)
+    save()
+    await ctx.send(embed=ok(f"{membre} ajouté à la whitelist."))
+
+
+@wl.command(name="del")
+@commands.has_permissions(administrator=True)
+async def wl_del(ctx, membre: discord.Member):
+    lst = DATA["whitelist"].get(str(ctx.guild.id), [])
+    if membre.id in lst:
+        lst.remove(membre.id)
+    save()
+    await ctx.send(embed=ok(f"{membre} retiré de la whitelist."))
 
 
 # ============================================================
