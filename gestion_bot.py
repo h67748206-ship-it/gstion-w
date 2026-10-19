@@ -1251,8 +1251,8 @@ def command_block(c):
     return f"**`{PREFIX}{c.name}{sig}`**\n{c.short_doc or 'Pas de description'}"
 
 
-async def send_category(ctx, title, cmds, color=discord.Color.blurple()):
-    """Envoie la liste des commandes au format embed, découpée si elle est trop longue."""
+def build_category_pages(title, cmds, color=discord.Color.blurple(), first_intro=True):
+    """Découpe la liste d'une catégorie en plusieurs embeds (limite Discord)."""
     chunks, current = [], ""
     for c in cmds:
         block = command_block(c) + "\n\n"
@@ -1262,36 +1262,87 @@ async def send_category(ctx, title, cmds, color=discord.Color.blurple()):
         current += block
     if current:
         chunks.append(current)
+    if not chunks:
+        chunks = ["Aucune commande."]
+    pages = []
     for i, body in enumerate(chunks):
-        intro = INTRO + "\n\n" if i == 0 else ""
-        embed = discord.Embed(title=title if i == 0 else f"{title} (suite)",
-                              description=(intro + body).rstrip(), color=color)
-        embed.set_footer(text=help_footer())
-        await ctx.send(embed=embed)
+        intro = INTRO + "\n\n" if (first_intro and i == 0) else ""
+        pages.append(discord.Embed(title=title if i == 0 else f"{title} (suite)",
+                                   description=(intro + body).rstrip(), color=color))
+    return pages
+
+
+def build_all_pages():
+    overview = discord.Embed(
+        title="📖 Aide",
+        description=INTRO + f"\n\nUtilise les boutons ◀ ▶ pour parcourir les catégories, "
+                            f"ou `{PREFIX}help <catégorie>` pour aller directement à une catégorie.",
+        color=discord.Color.blurple(),
+    )
+    pages = [overview]
+    for name, cog in bot.cogs.items():
+        cmds = [c for c in cog.get_commands() if not c.hidden]
+        if cmds:
+            pages.extend(build_category_pages(f"{CATEGORY_EMOJIS.get(name, '📁')} {name} ({len(cmds)})", cmds,
+                                              first_intro=False))
+    return pages
+
+
+class HelpView(discord.ui.View):
+    """Boutons ◀ ▶ pour parcourir les pages d'aide. Seul l'auteur de la commande peut les utiliser."""
+
+    def __init__(self, pages, author_id):
+        super().__init__(timeout=300)
+        self.pages = pages
+        self.index = 0
+        self.author_id = author_id
+        for i, page in enumerate(self.pages):
+            page.set_footer(text=f"{help_footer()} • {i + 1}/{len(self.pages)}")
+        self.refresh()
+
+    def refresh(self):
+        for child in self.children:
+            if child.custom_id == "help_prev":
+                child.disabled = self.index == 0
+            elif child.custom_id == "help_next":
+                child.disabled = self.index >= len(self.pages) - 1
+
+    async def check(self, interaction):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Seul l'auteur de la commande peut utiliser ces boutons.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="help_prev")
+    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.check(interaction):
+            return
+        self.index = max(0, self.index - 1)
+        self.refresh()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="help_next")
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.check(interaction):
+            return
+        self.index = min(len(self.pages) - 1, self.index + 1)
+        self.refresh()
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
 
 
 @bot.command(name="help")
 async def help_cmd(ctx, *, sujet: str = None):
     """Affiche la liste des commandes. +help <catégorie> ou +help <commande>."""
     if sujet is None:
-        intro = discord.Embed(
-            title="📖 Aide",
-            description=INTRO + f"\n\nTape `{PREFIX}help <catégorie>` pour une catégorie, "
-                                f"ou `{PREFIX}help <commande>` pour une commande.",
-            color=discord.Color.blurple(),
-        )
-        intro.set_footer(text=help_footer())
-        await ctx.send(embed=intro)
-        for name, cog in bot.cogs.items():
-            cmds = [c for c in cog.get_commands() if not c.hidden]
-            if cmds:
-                await send_category(ctx, f"{CATEGORY_EMOJIS.get(name, '📁')} {name} ({len(cmds)})", cmds)
-        return
+        pages = build_all_pages()
+        return await ctx.send(embed=pages[0], view=HelpView(pages, ctx.author.id))
 
     for name, cog in bot.cogs.items():
         if name.lower() == sujet.lower() or name.lower().endswith(sujet.lower()):
             cmds = [c for c in cog.get_commands() if not c.hidden]
-            return await send_category(ctx, f"{CATEGORY_EMOJIS.get(name, '📁')} {name}", cmds)
+            pages = build_category_pages(f"{CATEGORY_EMOJIS.get(name, '📁')} {name}", cmds)
+            return await ctx.send(embed=pages[0], view=HelpView(pages, ctx.author.id))
 
     cmd = bot.get_command(sujet)
     if cmd:
@@ -1307,62 +1358,6 @@ async def help_cmd(ctx, *, sujet: str = None):
         return await ctx.send(embed=embed)
 
     await ctx.send(f"❌ Aucune catégorie ni commande « {sujet} ». Tape `{PREFIX}help`.")
-
-
-# ---------------------------------------------------------------- STATUT DU BOT
-
-STATUS_KINDS = {
-    "jouer": discord.ActivityType.playing,
-    "regarder": discord.ActivityType.watching,
-    "ecouter": discord.ActivityType.listening,
-    "écouter": discord.ActivityType.listening,
-    "competition": discord.ActivityType.competing,
-    "compétition": discord.ActivityType.competing,
-}
-
-
-def build_activity(kind, text):
-    if kind == "perso":
-        return discord.CustomActivity(name=text)
-    return discord.Activity(type=STATUS_KINDS[kind], name=text)
-
-
-class Statut(commands.Cog, name="Statut du bot"):
-    """🤖 Statut du bot"""
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def status(self, ctx, kind: str = None, *, texte: str = None):
-        """Change le statut du bot : jouer, regarder, écouter, competition, perso, reset."""
-        if kind is None:
-            saved = config.get("bot_status")
-            if not saved:
-                return await ctx.send("🤖 Aucun statut personnalisé défini.")
-            return await ctx.send(f"🤖 Statut actuel : **{saved['type']}** {saved['text']}")
-
-        kind = kind.lower()
-        if kind == "reset":
-            config.pop("bot_status", None)
-            save_json(CONFIG_FILE, config)
-            await bot.change_presence(activity=None)
-            return await ctx.send("🤖 Statut réinitialisé.")
-
-        valid = set(STATUS_KINDS) | {"perso"}
-        if kind not in valid or not texte:
-            return await ctx.send(
-                f"❌ Usage : `{PREFIX}status <jouer|regarder|écouter|competition|perso|reset> <texte>`")
-
-        text = texte[:128]
-        config["bot_status"] = {"type": kind, "text": text}
-        save_json(CONFIG_FILE, config)
-        await bot.change_presence(activity=build_activity(kind, text))
-        await ctx.send(f"🤖 Statut mis à jour : **{kind}** {text}")
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        saved = config.get("bot_status")
-        if saved and saved.get("type") in set(STATUS_KINDS) | {"perso"}:
-            await bot.change_presence(activity=build_activity(saved["type"], saved["text"]))
 
 
 # ---------------------------------------------------------------- EVENTS
