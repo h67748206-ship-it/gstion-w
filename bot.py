@@ -28,7 +28,7 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='+', intents=intents)
 bot.remove_command('help')
 
-# Paramètres globaux (Anti-link, etc.)
+# Paramètres globaux
 config = {
     "antilink": False
 }
@@ -48,10 +48,8 @@ async def on_message(message):
 
     # Détection des liens si l'anti-link est activé
     if config["antilink"]:
-        # Regex pour repérer les URL et liens d'invitation Discord
         link_regex = r"(https?://[^\s]+|discord\.gg/[^\s]+|discord\.com/invite/[^\s]+)"
         if re.search(link_regex, message.content, re.IGNORECASE):
-            # Vérifie si l'auteur est administrateur / owner pour ne pas le bloquer
             if not message.author.guild_permissions.administrator:
                 try:
                     await message.delete()
@@ -450,4 +448,23 @@ async def helpall(ctx):
     embed.add_field(name="⛔ Perm 9", value="`+bl`, `+unbl`, `+blinfo`", inline=False)
     embed.add_field(
         name="⚙️ Owners",
-        value="`+cmute`, `+tempcmute`, `+uncmute`, `+mutelist`, `+unmuteall`, `+lock`, `+unlock`, `+lockall`, `+unlockall`, `+hide`, `+unhide`, `+hideall`, `+unhideall`, `+settings`, `+antispam`, `+antilink`, `+badwords`, `+allbots`, `+alladmins`, `+boosters
+        value="`+cmute`, `+tempcmute`, `+uncmute`, `+mutelist`, `+unmuteall`, `+lock`, `+unlock`, `+lockall`, `+unlockall`, `+hide`, `+unhide`, `+hideall`, `+unhideall`, `+settings`, `+antispam`, `+antilink`, `+badwords`, `+allbots`, `+alladmins`, `+boosters`, `+serverinfo`",
+        inline=False
+    )
+    embed.set_footer(text="Bot gstion • Préfixe : +")
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def help(ctx):
+    await ctx.send("Menu d'aide principal de gstion (`+help`). Tapez `+helpall` pour la liste complète.")
+
+# ==========================================
+#            LANCEMENT DU BOT
+# ==========================================
+if __name__ == "__main__":
+    keep_alive()
+    token = os.environ.get("DISCORD_TOKEN")
+    if not token:
+        print("ERREUR : La variable d'environnement DISCORD_TOKEN n'a pas été trouvée sur Render !")
+    else:
+        bot.run(token)
