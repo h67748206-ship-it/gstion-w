@@ -1,1378 +1,460 @@
-"""
-gestion_bot.py - Bot de gestion pour le serveur Yuu
-Préfixe : +        Aide : +help   (ou +help <catégorie> / +help <commande>)
-Installation : pip install -U discord.py
-Lancement    : export DISCORD_TOKEN="ton_token"  puis  python gestion_bot.py
-"""
-import asyncio
-import datetime
+import ast
 import json
+import operator
 import os
 import re
+import threading
 import time
-import urllib.parse
-import urllib.request
-from collections import defaultdict, deque
+from datetime import datetime, timedelta
+from urllib.parse import quote
 
+import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from flask import Flask
 
-TOKEN = os.getenv("DISCORD_TOKEN")  # ne jamais écrire le token dans le code
+# ============================================================
+# CONFIG
+# ============================================================
+TOKEN = os.getenv("DISCORD_TOKEN")
+PORT = int(os.getenv("PORT", "10000"))
 PREFIX = "+"
-CONFIG_FILE = "config.json"
-WARNS_FILE = "warns.json"
-
-
-def load_json(path, default):
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
-
-def save_json(path, data):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-
-config = load_json(CONFIG_FILE, {})
-warns = load_json(WARNS_FILE, {})
-MSG_FILE = "msgstats.json"
-msg_stats = load_json(MSG_FILE, {})  # {guild_id: {channel_id: nombre_de_messages}}
-
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-
-bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
-
-# Emojis personnalisés par catégorie (rendus par Discord si le bot a accès au serveur de l'emoji)
-CATEGORY_EMOJIS = {
-    "Configuration": "<:Crown:1561379407195545641>",
-    "Salons": "<:lock:1561379416414879777>",
-    "Modération": "<:b_DiscordModerateur:1561379409355739239>",
-    "Utilitaires": "<:b_DiscordStaff:1561379413902233673>",
-    "Protection": "<:1462041546160472095:1561379419178672158>",
-    "Statistiques": "📊",
-    "Outils": "🛠️",
-    "Gestion": "🧩",
-    "Modération avancée": "🔨",
-    "Recherche & infos": "🌐",
-    "Suggestions": "💡",
-    "Antiraid & antihack": "🛡️",
-    "Statut du bot": "🤖",
-}
-
-
-async def log_action(guild, title, description, color=discord.Color.orange()):
-    channel_id = config.get("log_channel")
-    if not channel_id:
-        return
-    channel = guild.get_channel(channel_id)
-    if channel:
-        await channel.send(embed=discord.Embed(title=title, description=description, color=color))
-
-
-def voice_targets(ctx, scope):
-    """'all' = tous les vocaux, sinon le vocal où se trouve l'auteur (None si aucun)."""
-    if scope == "all":
-        return ctx.guild.voice_channels
-    if ctx.author.voice and ctx.author.voice.channel:
-        return [ctx.author.voice.channel]
-    return None
-
-
-# ---------------------------------------------------------------- CONFIG
-
-class Configuration(commands.Cog):
-    """⚙️ Configuration"""
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setlog(self, ctx, channel: discord.TextChannel):
-        """Définit le salon des logs de modération."""
-        config["log_channel"] = channel.id
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"✅ Salon de logs : {channel.mention}")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setwelcome(self, ctx, channel: discord.TextChannel):
-        """Définit le salon de bienvenue."""
-        config["welcome_channel"] = channel.id
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"✅ Salon de bienvenue : {channel.mention}")
-
-
-# ---------------------------------------------------------------- SALONS
-
-class Salons(commands.Cog):
-    """🔐 Salons"""
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def hideall(self, ctx):
-        """Masque tous les salons pour @everyone."""
-        await ctx.send("🙈 Masquage de tous les salons...")
-        for channel in ctx.guild.channels:
-            await channel.set_permissions(ctx.guild.default_role, view_channel=False,
-                                          reason=f"hideall par {ctx.author}")
-        await ctx.send("🙈 Tous les salons sont masqués pour @everyone.")
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def showall(self, ctx):
-        """Réaffiche tous les salons pour @everyone."""
-        await ctx.send("👀 Réaffichage de tous les salons...")
-        for channel in ctx.guild.channels:
-            await channel.set_permissions(ctx.guild.default_role, view_channel=None,
-                                          reason=f"showall par {ctx.author}")
-        await ctx.send("👀 Tous les salons sont réaffichés pour @everyone.")
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def lock(self, ctx):
-        """Verrouille le salon texte pour @everyone."""
-        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-        await ctx.send("🔒 Salon verrouillé.")
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def unlock(self, ctx):
-        """Déverrouille le salon texte pour @everyone."""
-        await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=None)
-        await ctx.send("🔓 Salon déverrouillé.")
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def lockvoc(self, ctx, scope: str = None):
-        """Verrouille ton vocal, ou tous les vocaux avec +lockvoc all."""
-        targets = voice_targets(ctx, scope)
-        if targets is None:
-            return await ctx.send(f"❌ Rejoins un vocal ou tape `{PREFIX}lockvoc all`.")
-        for vc in targets:
-            await vc.set_permissions(ctx.guild.default_role, connect=False)
-        await ctx.send(f"🔒 {len(targets)} vocal(aux) verrouillé(s).")
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def unlockvoc(self, ctx, scope: str = None):
-        """Déverrouille ton vocal, ou tous les vocaux avec +unlockvoc all."""
-        targets = voice_targets(ctx, scope)
-        if targets is None:
-            return await ctx.send(f"❌ Rejoins un vocal ou tape `{PREFIX}unlockvoc all`.")
-        for vc in targets:
-            await vc.set_permissions(ctx.guild.default_role, connect=None)
-        await ctx.send(f"🔓 {len(targets)} vocal(aux) déverrouillé(s).")
-
-    @commands.command()
-    @commands.has_permissions(manage_channels=True)
-    async def slowmode(self, ctx, seconds: int = 0):
-        """Active le mode lent (0 pour désactiver), en secondes."""
-        await ctx.channel.edit(slowmode_delay=seconds)
-        await ctx.send(f"🐢 Mode lent : {seconds} s." if seconds else "🐇 Mode lent désactivé.")
-
-
-# ---------------------------------------------------------------- MODÉRATION
-
-class Moderation(commands.Cog, name="Modération"):
-    """🛡️ Modération"""
-
-    @commands.command()
-    @commands.has_permissions(kick_members=True)
-    async def kick(self, ctx, member: discord.Member, *, reason="Aucune raison"):
-        """Expulse un membre."""
-        await member.kick(reason=reason)
-        await ctx.send(f"👢 {member} a été expulsé. ({reason})")
-        await log_action(ctx.guild, "Kick", f"{member} par {ctx.author}\nRaison : {reason}")
-
-    @commands.command()
-    @commands.has_permissions(ban_members=True)
-    async def ban(self, ctx, member: discord.Member, *, reason="Aucune raison"):
-        """Bannit un membre."""
-        await member.ban(reason=reason)
-        await ctx.send(f"🔨 {member} a été banni. ({reason})")
-        await log_action(ctx.guild, "Ban", f"{member} par {ctx.author}\nRaison : {reason}",
-                         discord.Color.red())
-
-    @commands.command()
-    @commands.has_permissions(ban_members=True)
-    async def unban(self, ctx, user_id: int):
-        """Débannit un utilisateur via son ID."""
-        await ctx.guild.unban(discord.Object(id=user_id))
-        await ctx.send(f"✅ Utilisateur {user_id} débanni.")
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def timeout(self, ctx, member: discord.Member, minutes: int, *, reason="Aucune raison"):
-        """Met un membre en timeout (mute) pendant X minutes."""
-        until = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
-        await member.timeout(until, reason=reason)
-        await ctx.send(f"🔇 {member} est en timeout pour {minutes} min.")
-        await log_action(ctx.guild, "Timeout", f"{member} ({minutes} min) par {ctx.author}\nRaison : {reason}")
-
-    @commands.command(aliases=["unmute"])
-    @commands.has_permissions(moderate_members=True)
-    async def untimeout(self, ctx, member: discord.Member):
-        """Retire le timeout d'un membre."""
-        await member.timeout(None)
-        await ctx.send(f"🔊 Timeout retiré pour {member}.")
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def warn(self, ctx, members: commands.Greedy[discord.Member], *, reason="Aucune raison"):
-        """Donne un avertissement à un ou plusieurs membres."""
-        if not members:
-            return await ctx.send("❌ Mentionne au moins un membre.")
-        guild_warns = warns.setdefault(str(ctx.guild.id), {})
-        now = datetime.datetime.utcnow().isoformat(timespec="minutes")
-        for member in members:
-            guild_warns.setdefault(str(member.id), []).append({
-                "raison": reason, "par": ctx.author.id, "date": now,
-            })
-        save_json(WARNS_FILE, warns)
-        await ctx.send(f"⚠️ Avertissement donné à {', '.join(m.mention for m in members)}.")
-        await log_action(ctx.guild, "Warn", f"{', '.join(str(m) for m in members)} par {ctx.author}\nRaison : {reason}",
-                         discord.Color.gold())
-
-    @commands.command()
-    async def warnings(self, ctx, member: discord.Member = None):
-        """Affiche les avertissements d'un membre."""
-        member = member or ctx.author
-        items = warns.get(str(ctx.guild.id), {}).get(str(member.id), [])
-        if not items:
-            return await ctx.send(f"{member.display_name} n'a aucun avertissement.")
-        lines = [f"**{i}.** {w['date']} - {w['raison']}" for i, w in enumerate(items, 1)]
-        embed = discord.Embed(title=f"Avertissements de {member.display_name}",
-                              description="\n".join(lines), color=discord.Color.gold())
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def clearwarns(self, ctx, member: discord.Member):
-        """Supprime tous les avertissements d'un membre."""
-        warns.get(str(ctx.guild.id), {}).pop(str(member.id), None)
-        save_json(WARNS_FILE, warns)
-        await ctx.send(f"🧽 Avertissements de {member.display_name} supprimés.")
-
-    @commands.group(invoke_without_command=True)
-    @commands.has_permissions(manage_messages=True)
-    async def clear(self, ctx, amount: int = 10, member: discord.Member = None):
-        """Supprime X messages, ou seulement ceux d'un membre. Sous-commandes : sanctions, blrank."""
-        if member is None:
-            deleted = await ctx.channel.purge(limit=amount + 1)
-            return await ctx.send(f"🧹 {len(deleted) - 1} messages supprimés.", delete_after=3)
-        deleted = await ctx.channel.purge(limit=min(amount, 200), check=lambda m: m.author == member)
-        await ctx.send(f"🧹 {len(deleted)} message(s) de {member.display_name} supprimé(s).", delete_after=3)
-
-    @clear.command(name="sanctions")
-    @commands.has_permissions(moderate_members=True)
-    async def clear_sanctions(self, ctx, member: discord.Member):
-        """Supprime toutes les sanctions d'un membre."""
-        warns.get(str(ctx.guild.id), {}).pop(str(member.id), None)
-        save_json(WARNS_FILE, warns)
-        await ctx.send(f"🧽 Sanctions de {member.display_name} supprimées.")
-
-    @clear.command(name="blrank")
-    @commands.has_permissions(manage_roles=True)
-    async def clear_blrank(self, ctx):
-        """Retire tous les membres de la blacklist rank."""
-        blrank_state()["members"] = []
-        save_json(CONFIG_FILE, config)
-        await ctx.send("🧹 Blacklist rank vidée.")
-
-
-# ---------------------------------------------------------------- UTILITAIRES
-
-class Utility(commands.Cog, name="Utilitaires"):
-    """🧰 Utilitaires"""
-
-    @commands.command()
-    async def ping(self, ctx):
-        """Affiche la latence du bot."""
-        await ctx.send(f"🏓 Pong ! {round(bot.latency * 1000)} ms")
-
-    @commands.command()
-    async def userinfo(self, ctx, member: discord.Member = None):
-        """Affiche les infos d'un membre."""
-        member = member or ctx.author
-        embed = discord.Embed(title=str(member), color=member.color)
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="ID", value=member.id)
-        embed.add_field(name="Compte créé", value=discord.utils.format_dt(member.created_at, "D"))
-        embed.add_field(name="A rejoint", value=discord.utils.format_dt(member.joined_at, "D"))
-        embed.add_field(name="Rôles", value=f"{len(member.roles) - 1}", inline=False)
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def serverinfo(self, ctx):
-        """Affiche les infos du serveur."""
-        g = ctx.guild
-        embed = discord.Embed(title=g.name, color=discord.Color.blurple())
-        if g.icon:
-            embed.set_thumbnail(url=g.icon.url)
-        embed.add_field(name="Membres", value=g.member_count)
-        embed.add_field(name="Salons", value=len(g.channels))
-        embed.add_field(name="Rôles", value=len(g.roles))
-        embed.add_field(name="Créé le", value=discord.utils.format_dt(g.created_at, "D"))
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def avatar(self, ctx, member: discord.Member = None):
-        """Affiche l'avatar d'un membre."""
-        member = member or ctx.author
-        embed = discord.Embed(title=f"Avatar de {member.display_name}", color=member.color)
-        embed.set_image(url=member.display_avatar.url)
-        await ctx.send(embed=embed)
-
-
-# ---------------------------------------------------------------- PROTECTION
-
-LINK_RE = re.compile(r"(https?://\S+|discord\.gg/\S+|www\.\S+)", re.IGNORECASE)
-NUKE_LIMIT = 3       # nombre d'actions destructrices autorisées...
-NUKE_WINDOW = 10     # ...dans cette fenêtre (secondes)
-nuke_tracker = {}    # {(guild_id, user_id): [timestamps]}
-
-
-def prot(guild_id):
-    """Réglages de protection d'un serveur (créés au besoin)."""
-    return config.setdefault("protection", {}).setdefault(
-        str(guild_id), {"antilink": False, "antinuke": False, "whitelist": []})
-
-
-def is_trusted(member):
-    """Admins, gérants et membres whitelistés ne sont pas concernés par l'anti-link."""
-    if member.guild_permissions.administrator or member.guild_permissions.manage_guild:
-        return True
-    return member.id in prot(member.guild.id)["whitelist"]
-
-
-async def nuke_check(guild, action, label):
-    cfg = prot(guild.id)
-    if not cfg["antinuke"]:
-        return
-    entry = None
-    async for e in guild.audit_logs(limit=1, action=action):
-        entry = e
-        break
-    if entry is None or entry.user is None:
-        return
-    if discord.utils.utcnow() - entry.created_at > datetime.timedelta(seconds=NUKE_WINDOW):
-        return  # entrée d'audit ancienne : elle ne correspond pas à cette action
-    user = entry.user
-    if user.id in (bot.user.id, guild.owner_id) or user.id in cfg["whitelist"]:
-        return
-
-    now = time.time()
-    key = (guild.id, user.id)
-    hits = [t for t in nuke_tracker.get(key, []) if now - t < NUKE_WINDOW] + [now]
-    nuke_tracker[key] = hits
-    if len(hits) < NUKE_LIMIT:
-        return
-
-    nuke_tracker.pop(key, None)
-    member = guild.get_member(user.id)
-    punished = "aucune (membre introuvable)"
-    if member:
-        try:
-            await member.ban(reason=f"Anti-nuke : {label} en masse")
-            punished = "banni"
-        except discord.HTTPException:
-            punished = "impossible à bannir (rôle trop haut ?)"
-    await log_action(guild, "🚨 Anti-nuke",
-                     f"{user} ({label}, {len(hits)} actions en {NUKE_WINDOW}s)\nSanction : {punished}",
-                     discord.Color.red())
-
-
-@bot.event
-async def on_message(message):
-    if message.author.bot or not message.guild:
-        return await bot.process_commands(message)
-    if prot(message.guild.id)["antilink"] and LINK_RE.search(message.content) \
-            and not is_trusted(message.author):
-        try:
-            await message.delete()
-        except discord.HTTPException:
-            pass
-        await message.channel.send(f"🔗 {message.author.mention}, les liens ne sont pas autorisés ici.",
-                                   delete_after=5)
-        await log_action(message.guild, "🔗 Anti-link",
-                         f"{message.author} a envoyé un lien dans {message.channel.mention}")
-        return
-    await bot.process_commands(message)
-
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    await nuke_check(channel.guild, discord.AuditLogAction.channel_delete, "suppression de salons")
-
-
-@bot.event
-async def on_guild_role_delete(role):
-    await nuke_check(role.guild, discord.AuditLogAction.role_delete, "suppression de rôles")
-
-
-@bot.event
-async def on_member_ban(guild, user):
-    await nuke_check(guild, discord.AuditLogAction.ban, "bans en masse")
-
-
-class Protection(commands.Cog):
-    """🛡️ Protection"""
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def antilink(self, ctx, etat: str):
-        """Active ou désactive l'anti-link (on/off)."""
-        cfg = prot(ctx.guild.id)
-        cfg["antilink"] = etat.lower() == "on"
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"🔗 Anti-link {'activé' if cfg['antilink'] else 'désactivé'}.")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def antinuke(self, ctx, etat: str):
-        """Active ou désactive l'anti-nuke (on/off)."""
-        cfg = prot(ctx.guild.id)
-        cfg["antinuke"] = etat.lower() == "on"
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"🚨 Anti-nuke {'activé' if cfg['antinuke'] else 'désactivé'}.")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def whitelist(self, ctx, member: discord.Member):
-        """Ajoute un membre à la whitelist (exempté de l'anti-link et de l'anti-nuke)."""
-        cfg = prot(ctx.guild.id)
-        if member.id not in cfg["whitelist"]:
-            cfg["whitelist"].append(member.id)
-            save_json(CONFIG_FILE, config)
-        await ctx.send(f"✅ {member.display_name} est whitelisté.")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def unwhitelist(self, ctx, member: discord.Member):
-        """Retire un membre de la whitelist."""
-        cfg = prot(ctx.guild.id)
-        if member.id in cfg["whitelist"]:
-            cfg["whitelist"].remove(member.id)
-            save_json(CONFIG_FILE, config)
-        await ctx.send(f"❌ {member.display_name} n'est plus whitelisté.")
-
-    @commands.command()
-    async def protection(self, ctx):
-        """Affiche l'état des protections du serveur."""
-        cfg = prot(ctx.guild.id)
-        embed = discord.Embed(title="🛡️ État des protections", color=discord.Color.blurple())
-        embed.add_field(name="🔗 Anti-link", value="activé" if cfg["antilink"] else "désactivé")
-        embed.add_field(name="🚨 Anti-nuke", value="activé" if cfg["antinuke"] else "désactivé")
-        embed.add_field(name="✅ Whitelist", value=f"{len(cfg['whitelist'])} membre(s)")
-        await ctx.send(embed=embed)
-
-
-# ---------------------------------------------------------------- STATISTIQUES
-
-class Statistiques(commands.Cog):
-    """📊 Statistiques"""
-
-    @commands.command()
-    async def stats(self, ctx):
-        """Affiche les statistiques du serveur."""
-        g = ctx.guild
-        members = g.members
-        bots = sum(1 for m in members if m.bot)
-        humans = len(members) - bots
-
-        embed = discord.Embed(
-            title=f"📊 Statistiques de {g.name}",
-            color=discord.Color.blurple(),
-            timestamp=discord.utils.utcnow(),
-        )
-        if g.icon:
-            embed.set_thumbnail(url=g.icon.url)
-        embed.add_field(name="👥 Membres", value=f"**{g.member_count}** au total", inline=True)
-        embed.add_field(name="🧑 Humains", value=str(humans), inline=True)
-        embed.add_field(name="🤖 Bots", value=str(bots), inline=True)
-        embed.add_field(name="💬 Salons texte", value=str(len(g.text_channels)), inline=True)
-        embed.add_field(name="🔊 Salons vocaux", value=str(len(g.voice_channels)), inline=True)
-        embed.add_field(name="📁 Catégories", value=str(len(g.categories)), inline=True)
-        embed.add_field(name="🎭 Rôles", value=str(len(g.roles) - 1), inline=True)
-        embed.add_field(name="💎 Boosts",
-                        value=f"{g.premium_subscription_count} (niveau {g.premium_tier})", inline=True)
-        embed.add_field(name="📅 Créé le", value=discord.utils.format_dt(g.created_at, "D"), inline=True)
-        embed.set_footer(text=f"Demandé par {ctx.author}")
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def rolemembers(self, ctx, role: discord.Role):
-        """Affiche le nombre de membres ayant un rôle donné."""
-        embed = discord.Embed(title=f"🎭 {role.name}", color=role.color)
-        embed.add_field(name="Membres", value=str(len(role.members)), inline=True)
-        embed.add_field(name="Mentionnable", value="oui" if role.mentionable else "non", inline=True)
-        embed.add_field(name="Créé le", value=discord.utils.format_dt(role.created_at, "D"), inline=True)
-        await ctx.send(embed=embed)
-
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        if message.author.bot or not message.guild:
-            return
-        guild_stats = msg_stats.setdefault(str(message.guild.id), {})
-        cid = str(message.channel.id)
-        guild_stats[cid] = guild_stats.get(cid, 0) + 1
-        save_json(MSG_FILE, msg_stats)
-
-    @commands.command()
-    async def topsalons(self, ctx):
-        """Affiche les 5 salons les plus actifs (messages comptés depuis l'installation)."""
-        counts = msg_stats.get(str(ctx.guild.id), {})
-        if not counts:
-            return await ctx.send("📭 Aucun message compté pour l'instant.")
-        top = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-        lines = []
-        for i, (cid, n) in enumerate(top):
-            channel = ctx.guild.get_channel(int(cid))
-            name = channel.mention if channel else f"(salon supprimé {cid})"
-            lines.append(f"{medals[i]} {name} : **{n}** messages")
-        embed = discord.Embed(title="💬 Salons les plus actifs", description="\n".join(lines),
-                              color=discord.Color.blurple())
-        embed.set_footer(text=f"Total compté : {sum(counts.values())} messages")
-        await ctx.send(embed=embed)
-
-
-# ---------------------------------------------------------------- OUTILS
-
-class Outils(commands.Cog):
-    """🛠️ Outils"""
-
-    @commands.command()
-    @commands.has_permissions(manage_messages=True)
-    async def sondage(self, ctx, *, question: str):
-        """Lance un sondage oui/non avec réactions."""
-        embed = discord.Embed(title="📊 Sondage", description=question, color=discord.Color.blurple())
-        embed.set_footer(text=f"Proposé par {ctx.author}")
-        msg = await ctx.send(embed=embed)
-        await msg.add_reaction("👍")
-        await msg.add_reaction("👎")
-
-    @commands.command()
-    @commands.has_permissions(manage_messages=True)
-    async def annonce(self, ctx, channel: discord.TextChannel, *, texte: str):
-        """Publie une annonce en embed dans un salon."""
-        embed = discord.Embed(title="📢 Annonce", description=texte, color=discord.Color.gold(),
-                              timestamp=discord.utils.utcnow())
-        embed.set_footer(text=f"Par {ctx.author}")
-        await channel.send(embed=embed)
-        await ctx.send(f"✅ Annonce publiée dans {channel.mention}.", delete_after=5)
-
-
-# ---------------------------------------------------------------- GESTION
-
-import ast
-import operator
-
-NOTES_FILE = "notes.json"
-notes = load_json(NOTES_FILE, {})
-last_deleted = {}  # channel_id -> dernier message supprimé (pour +snipe)
-
-_SAFE_OPS = {
-    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
-    ast.Div: operator.truediv, ast.Mod: operator.mod, ast.Pow: operator.pow,
-    ast.USub: operator.neg, ast.UAdd: operator.pos,
-}
-
-
-def safe_eval(node):
-    """Évalue une expression mathématique simple, sans exécuter de code."""
-    if isinstance(node, ast.Expression):
-        return safe_eval(node.body)
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-        return node.value
-    if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_OPS:
-        right = safe_eval(node.right)
-        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
-            raise ValueError("exposant trop grand")
-        return _SAFE_OPS[type(node.op)](safe_eval(node.left), right)
-    if isinstance(node, ast.UnaryOp) and type(node.op) in _SAFE_OPS:
-        return _SAFE_OPS[type(node.op)](safe_eval(node.operand))
-    raise ValueError("expression non supportée")
-
-
-class Gestion(commands.Cog):
-    """🧩 Gestion"""
-
-    # ---- Raccourcis demandés (+del sanction, +server pic, +mute multi)
-    @commands.group(name="del", invoke_without_command=True)
-    @commands.has_permissions(moderate_members=True)
-    async def del_group(self, ctx):
-        """Sous-commandes : +del sanction <membre> <nombre>."""
-        await ctx.send(f"❌ Utilise `{PREFIX}del sanction <membre> <nombre>`.")
-
-    @del_group.command(name="sanction")
-    @commands.has_permissions(moderate_members=True)
-    async def del_sanction(self, ctx, member: discord.Member, numero: int):
-        """Supprime une sanction pour un membre."""
-        await ctx.invoke(bot.get_command("delsanction"), member=member, numero=numero)
-
-    @commands.group(name="server", invoke_without_command=True)
-    async def server_group(self, ctx):
-        """Sous-commandes : +server pic, +server banner."""
-        await ctx.send(f"❌ Utilise `{PREFIX}server pic` ou `{PREFIX}server banner`.")
-
-    @server_group.command(name="pic")
-    async def server_pic(self, ctx):
-        """Récupère l'icône du serveur."""
-        await ctx.invoke(bot.get_command("serverpic"))
-
-    @server_group.command(name="banner")
-    async def server_banner(self, ctx):
-        """Récupère la bannière du serveur."""
-        await ctx.invoke(bot.get_command("serverbanner"))
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def mute(self, ctx, members: commands.Greedy[discord.Member], *, raison="Aucune raison"):
-        """Mute un ou plusieurs membres pendant 60 min (+tempmute pour choisir la durée)."""
-        if not members:
-            return await ctx.send("❌ Mentionne au moins un membre.")
-        until = discord.utils.utcnow() + datetime.timedelta(minutes=60)
-        for member in members:
-            await member.timeout(until, reason=raison)
-        await ctx.send(f"🔇 {', '.join(m.mention for m in members)} mute(s) pendant 60 min.")
-        await log_action(ctx.guild, "Mute", f"{', '.join(str(m) for m in members)} par {ctx.author}\nRaison : {raison}")
-
-    # ---- Sanctions
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def sanctions(self, ctx, member: discord.Member):
-        """Affiche les sanctions d'un membre."""
-        await ctx.invoke(bot.get_command("warnings"), member=member)
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def delsanction(self, ctx, member: discord.Member, numero: int):
-        """Supprime la sanction n° X d'un membre (voir +sanctions)."""
-        items = warns.get(str(ctx.guild.id), {}).get(str(member.id), [])
-        if not 1 <= numero <= len(items):
-            return await ctx.send("❌ Numéro de sanction invalide.")
-        removed = items.pop(numero - 1)
-        save_json(WARNS_FILE, warns)
-        await ctx.send(f"🗑️ Sanction n°{numero} retirée pour {member.display_name} ({removed['raison']}).")
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def clearsanctions(self, ctx, member: discord.Member):
-        """Supprime toutes les sanctions d'un membre."""
-        await ctx.invoke(bot.get_command("clearwarns"), member=member)
-
-    # ---- Notes de modération
-    @commands.group(invoke_without_command=True)
-    @commands.has_permissions(moderate_members=True)
-    async def note(self, ctx, member: discord.Member, *, texte: str = None):
-        """Ajoute une note de modération, ou affiche les notes sans texte."""
-        guild_notes = notes.setdefault(str(ctx.guild.id), {}).setdefault(str(member.id), [])
-        if texte is None:
-            if not guild_notes:
-                return await ctx.send(f"{member.display_name} n'a aucune note.")
-            lines = [f"**{i}.** {n['date']} par <@{n['par']}> - {n['texte']}"
-                     for i, n in enumerate(guild_notes, 1)]
-            embed = discord.Embed(title=f"Notes de {member.display_name}",
-                                  description="\n".join(lines), color=discord.Color.blurple())
-            return await ctx.send(embed=embed)
-        guild_notes.append({"texte": texte, "par": ctx.author.id,
-                            "date": datetime.datetime.utcnow().isoformat(timespec="minutes")})
-        save_json(NOTES_FILE, notes)
-        await ctx.send(f"📝 Note ajoutée pour {member.display_name} ({len(guild_notes)} au total).")
-
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def notedelete(self, ctx, cible: str, numero: str = None):
-        """+notedelete all : supprime toutes les notes du serveur. +notedelete @membre <n/all> : supprime des notes."""
-        guild_notes = notes.setdefault(str(ctx.guild.id), {})
-        if cible.lower() == "all" and numero is None:
-            notes[str(ctx.guild.id)] = {}
-            save_json(NOTES_FILE, notes)
-            return await ctx.send("🗑️ Toutes les notes du serveur ont été supprimées.")
-        member = await commands.MemberConverter().convert(ctx, cible)
-        if numero is None:
-            return await ctx.send(f"❌ Précise un numéro ou `all`. Ex : `{PREFIX}notedelete {member.mention} all`")
-        if numero.lower() == "all":
-            guild_notes.pop(str(member.id), None)
-            msg = f"🗑️ Toutes les notes de {member.display_name} ont été supprimées."
-        else:
-            items = guild_notes.get(str(member.id), [])
-            if not numero.isdigit() or not 1 <= int(numero) <= len(items):
-                return await ctx.send("❌ Numéro de note invalide.")
-            items.pop(int(numero) - 1)
-            msg = f"🗑️ Note n°{numero} supprimée pour {member.display_name}."
-        save_json(NOTES_FILE, notes)
-        await ctx.send(msg)
-
-    @note.command(name="delete")
-    @commands.has_permissions(administrator=True)
-    async def note_delete(self, ctx, cible: str, numero: str = None):
-        """+note delete all : toutes les notes du serveur. +note delete @membre <n/all> : notes d'un membre."""
-        await ctx.invoke(bot.get_command("notedelete"), cible=cible, numero=numero)
-
-    # ---- Messages
-    @commands.command()
-    @commands.has_permissions(manage_messages=True)
-    async def clearuser(self, ctx, member: discord.Member, amount: int = 50):
-        """Supprime les messages d'un membre dans le salon (30 derniers par défaut, 50 max)."""
-        deleted = await ctx.channel.purge(limit=min(amount, 200), check=lambda m: m.author == member)
-        await ctx.send(f"🧹 {len(deleted)} message(s) de {member.display_name} supprimé(s).", delete_after=3)
-
-    @commands.Cog.listener()
-    async def on_message_delete(self, message):
-        if message.guild and not message.author.bot:
-            last_deleted[message.channel.id] = message
-
-    @commands.command()
-    @commands.has_permissions(manage_messages=True)
-    async def snipe(self, ctx):
-        """Affiche le dernier message supprimé du salon."""
-        msg = last_deleted.get(ctx.channel.id)
-        if not msg:
-            return await ctx.send("❌ Aucun message supprimé récemment dans ce salon.")
-        embed = discord.Embed(description=msg.content or "*(pas de texte)*", color=discord.Color.red(),
-                              timestamp=msg.created_at)
-        embed.set_author(name=str(msg.author), icon_url=msg.author.display_avatar.url)
-        await ctx.send(embed=embed)
-
-    # ---- Rôles
-    @commands.command()
-    @commands.has_permissions(manage_roles=True)
-    async def addrole(self, ctx, member: discord.Member, *roles: discord.Role):
-        """Ajoute un ou plusieurs rôles à un membre."""
-        ok = [r for r in roles if r < ctx.guild.me.top_role and not r.managed]
-        if not ok:
-            return await ctx.send("❌ Aucun rôle ajoutable (hiérarchie ou rôle géré).")
-        await member.add_roles(*ok, reason=f"addrole par {ctx.author}")
-        await ctx.send(f"✅ Rôle(s) ajouté(s) à {member.display_name} : {', '.join(r.name for r in ok)}")
-
-    @commands.command()
-    @commands.has_permissions(manage_roles=True)
-    async def delrole(self, ctx, member: discord.Member, *roles: discord.Role):
-        """Retire un ou plusieurs rôles à un membre."""
-        ok = [r for r in roles if r < ctx.guild.me.top_role and not r.managed and r in member.roles]
-        if not ok:
-            return await ctx.send("❌ Aucun rôle retirable (hiérarchie, rôle géré ou absent).")
-        await member.remove_roles(*ok, reason=f"delrole par {ctx.author}")
-        await ctx.send(f"✅ Rôle(s) retiré(s) à {member.display_name} : {', '.join(r.name for r in ok)}")
-
-    @commands.command()
-    @commands.has_permissions(manage_roles=True)
-    async def derank(self, ctx, member: discord.Member):
-        """Retire tous les rôles retirables d'un membre."""
-        ok = [r for r in member.roles if not r.is_default() and not r.managed and r < ctx.guild.me.top_role]
-        if not ok:
-            return await ctx.send("❌ Ce membre n'a aucun rôle retirable.")
-        await member.remove_roles(*ok, reason=f"derank par {ctx.author}")
-        await ctx.send(f"✅ {len(ok)} rôle(s) retiré(s) à {member.display_name}.")
-
-    # ---- Pseudos
-    @commands.command()
-    @commands.has_permissions(manage_nicknames=True)
-    async def nick(self, ctx, member: discord.Member, *, nom: str):
-        """Change le pseudo d'un membre sur le serveur."""
-        await member.edit(nick=nom, reason=f"nick par {ctx.author}")
-        await ctx.send(f"✏️ Pseudo de {member.mention} changé en **{nom}**.")
-
-    @commands.command()
-    @commands.has_permissions(manage_nicknames=True)
-    async def lockname(self, ctx, member: discord.Member, *, nom: str):
-        """Verrouille le pseudo d'un membre : il ne pourra plus le changer."""
-        config.setdefault("locked_names", {})[str(member.id)] = nom
-        save_json(CONFIG_FILE, config)
-        await member.edit(nick=nom, reason=f"lockname par {ctx.author}")
-        await ctx.send(f"🔒 Pseudo de {member.mention} verrouillé sur **{nom}**.")
-
-    @commands.command()
-    @commands.has_permissions(manage_nicknames=True)
-    async def unlockname(self, ctx, member: discord.Member):
-        """Déverrouille le pseudo d'un membre."""
-        config.get("locked_names", {}).pop(str(member.id), None)
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"🔓 Pseudo de {member.mention} déverrouillé.")
-
-    @commands.command()
-    @commands.has_permissions(manage_nicknames=True)
-    async def locknamelist(self, ctx):
-        """Affiche les membres dont le pseudo est verrouillé."""
-        locked = config.get("locked_names", {})
-        if not locked:
-            return await ctx.send("Aucun pseudo verrouillé.")
-        lines = [f"<@{uid}> → **{nom}**" for uid, nom in locked.items()]
-        await ctx.send(embed=discord.Embed(title="🔒 Pseudos verrouillés",
-                                           description="\n".join(lines), color=discord.Color.blurple()))
-
-    @commands.Cog.listener()
-    async def on_member_update(self, before, after):
-        if before.nick == after.nick:
-            return
-        locked = config.get("locked_names", {}).get(str(after.id))
-        if locked and after.nick != locked:
-            try:
-                await after.edit(nick=locked, reason="Pseudo verrouillé")
-            except discord.Forbidden:
-                pass
-
-    # ---- Suggestions
-    @commands.command()
-    @commands.has_permissions(administrator=True)
-    async def setsuggestion(self, ctx, channel: discord.TextChannel):
-        """Définit le salon des suggestions."""
-        config["suggestion_channel"] = channel.id
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"✅ Salon des suggestions : {channel.mention}")
-
-    @commands.command()
-    async def suggestion(self, ctx, *, texte: str):
-        """Poste une suggestion dans le salon des suggestions."""
-        channel = ctx.guild.get_channel(config.get("suggestion_channel", 0))
-        if not channel:
-            return await ctx.send("❌ Aucun salon de suggestions défini (`+setsuggestion #salon`).")
-        embed = discord.Embed(title="💡 Suggestion", description=texte, color=discord.Color.gold(),
-                              timestamp=discord.utils.utcnow())
-        embed.set_footer(text=f"Par {ctx.author}")
-        msg = await channel.send(embed=embed)
-        await msg.add_reaction("👍")
-        await msg.add_reaction("👎")
-        await ctx.send("✅ Suggestion envoyée.", delete_after=5)
-
-    # ---- Utilitaires
-    @commands.command()
-    async def calc(self, ctx, *, expression: str):
-        """Calcule une expression, ex : +calc (3+4)*2^3"""
-        try:
-            result = safe_eval(ast.parse(expression.replace("^", "**"), mode="eval"))
-        except Exception:
-            return await ctx.send("❌ Calcul invalide. Opérations acceptées : + - * / % ^ et parenthèses.")
-        await ctx.send(embed=discord.Embed(title="🧮 Calcul", description=f"`{expression}` = **{result}**",
-                                           color=discord.Color.blurple()))
-
-    @commands.command()
-    async def serverpic(self, ctx):
-        """Affiche l'icône du serveur en grand."""
-        if not ctx.guild.icon:
-            return await ctx.send("❌ Ce serveur n'a pas d'icône.")
-        embed = discord.Embed(title=f"Icône de {ctx.guild.name}", color=discord.Color.blurple())
-        embed.set_image(url=ctx.guild.icon.url)
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def serverbanner(self, ctx):
-        """Affiche la bannière du serveur."""
-        if not ctx.guild.banner:
-            return await ctx.send("❌ Ce serveur n'a pas de bannière.")
-        embed = discord.Embed(title=f"Bannière de {ctx.guild.name}", color=discord.Color.blurple())
-        embed.set_image(url=ctx.guild.banner.url)
-        await ctx.send(embed=embed)
-
-
-# ---------------------------------------------------------------- MODÉRATION AVANCÉE
-
-DUREE_UNITES = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
-
-
-def parse_duree(texte):
-    m = re.fullmatch(r"(\d+)([smhdw])", texte.lower())
-    if not m:
-        return None
-    return datetime.timedelta(seconds=int(m.group(1)) * DUREE_UNITES[m.group(2)])
-
-
-class ModerationAvancee(commands.Cog, name="Modération avancée"):
-    """🔨 Modération avancée"""
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def tempmute(self, ctx, member: discord.Member, duree: str, *, raison="Aucune raison"):
-        """Mute un membre pendant une durée, ex : 10m, 2h, 1d (28 jours max)."""
-        delta = parse_duree(duree)
-        if delta is None or delta > datetime.timedelta(days=28):
-            return await ctx.send("❌ Durée invalide. Exemples : `10m`, `2h`, `1d` (28 jours max).")
-        await member.timeout(discord.utils.utcnow() + delta, reason=raison)
-        await ctx.send(f"🔇 {member.mention} est mute pendant {duree}.")
-        await log_action(ctx.guild, "Tempmute", f"{member} ({duree}) par {ctx.author}\nRaison : {raison}")
-
-    @commands.command()
-    @commands.has_permissions(ban_members=True)
-    async def banlist(self, ctx):
-        """Affiche les bannissements en cours sur le serveur."""
-        bans = [entry async for entry in ctx.guild.bans(limit=50)]
-        if not bans:
-            return await ctx.send("✅ Aucun bannissement en cours.")
-        lignes = [f"• **{b.user}** (`{b.user.id}`) - {b.reason or 'Aucune raison'}" for b in bans]
-        embed = discord.Embed(title=f"🔨 Bannissements ({len(bans)})", description="\n".join(lignes)[:4000],
-                              color=discord.Color.red())
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def perms(self, ctx):
-        """Affiche les rôles ayant des permissions sensibles sur le serveur."""
-        sensibles = {
-            "administrator": "Administrateur", "manage_guild": "Gérer le serveur",
-            "ban_members": "Bannir", "kick_members": "Expulser", "manage_roles": "Gérer les rôles",
-            "manage_channels": "Gérer les salons", "moderate_members": "Modérer",
-        }
-        lignes = []
-        for role in reversed(ctx.guild.roles):
-            if role.is_default():
-                continue
-            droits = [nom for attr, nom in sensibles.items() if getattr(role.permissions, attr)]
-            if droits:
-                lignes.append(f"**{role.name}** : {', '.join(droits)}")
-        embed = discord.Embed(title="🔑 Permissions sensibles", description="\n".join(lignes)[:4000] or "Aucun rôle sensible.",
-                              color=discord.Color.orange())
-        await ctx.send(embed=embed)
-
-
-# ---------------------------------------------------------------- RECHERCHE
-
-def http_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "gestion-bot/1.0"})
-    with urllib.request.urlopen(req, timeout=10) as reponse:
-        return json.loads(reponse.read().decode("utf-8"))
-
-
-class Recherche(commands.Cog, name="Recherche & infos"):
-    """🌐 Recherche & infos"""
-
-    @commands.command()
-    async def wiki(self, ctx, *, mot: str):
-        """Affiche le résumé d'un article Wikipédia (fr)."""
-        url = "https://fr.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(mot.replace(" ", "_"))
-        try:
-            data = await asyncio.to_thread(http_json, url)
-        except Exception:
-            return await ctx.send("❌ Aucun article trouvé.")
-        page = data.get("content_urls", {}).get("desktop", {}).get("page")
-        embed = discord.Embed(title=data.get("title", mot), url=page,
-                              description=(data.get("extract") or "Pas de résumé.")[:1000],
-                              color=discord.Color.blurple())
-        if data.get("thumbnail"):
-            embed.set_thumbnail(url=data["thumbnail"]["source"])
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def searchwiki(self, ctx, *, mot: str):
-        """Liste les articles Wikipédia liés à un mot-clé."""
-        url = ("https://fr.wikipedia.org/w/api.php?action=opensearch&limit=5&format=json&search="
-               + urllib.parse.quote(mot))
-        try:
-            _, titres, _, liens = await asyncio.to_thread(http_json, url)
-        except Exception:
-            return await ctx.send("❌ Recherche impossible pour le moment.")
-        if not titres:
-            return await ctx.send("❌ Aucun article trouvé.")
-        lignes = [f"• [{t}]({l})" for t, l in zip(titres, liens)]
-        await ctx.send(embed=discord.Embed(title=f"📚 Wikipédia : {mot}", description="\n".join(lignes),
-                                           color=discord.Color.blurple()))
-
-    @commands.command()
-    async def image(self, ctx, *, mot: str):
-        """Donne le lien de recherche d'images Google pour un mot-clé."""
-        url = "https://www.google.com/search?tbm=isch&q=" + urllib.parse.quote(mot)
-        await ctx.send(embed=discord.Embed(title=f"🖼️ Images : {mot}", description=f"[Ouvrir la recherche]({url})",
-                                           url=url, color=discord.Color.blurple()))
-
-    @commands.command()
-    async def emoji(self, ctx, emoji_texte: str):
-        """Récupère l'image d'un emoji personnalisé."""
-        m = re.fullmatch(r"<(a?):\w+:(\d+)>", emoji_texte.strip())
-        if not m:
-            return await ctx.send("❌ Donne un emoji personnalisé (pas un emoji Unicode).")
-        extension = "gif" if m.group(1) else "png"
-        url = f"https://cdn.discordapp.com/emojis/{m.group(2)}.{extension}"
-        embed = discord.Embed(title="😀 Emoji", url=url, color=discord.Color.blurple())
-        embed.set_image(url=url)
-        await ctx.send(embed=embed)
-
-    @commands.command()
-    async def banner(self, ctx, member: discord.Member = None):
-        """Affiche la bannière d'un membre."""
-        member = member or ctx.author
-        user = await bot.fetch_user(member.id)
-        if not user.banner:
-            return await ctx.send("❌ Ce membre n'a pas de bannière.")
-        embed = discord.Embed(title=f"Bannière de {member.display_name}", color=member.color)
-        embed.set_image(url=user.banner.url)
-        await ctx.send(embed=embed)
-
-
-# ---------------------------------------------------------------- SUGGESTIONS
-
-class Suggestions(commands.Cog):
-    """💡 Suggestions"""
-
-    @commands.group(name="lb", invoke_without_command=True)
-    async def lb(self, ctx):
-        """Classements. Ex : +lb suggestions"""
-        await ctx.send(f"❌ Utilise `{PREFIX}lb suggestions`.")
-
-    @lb.command(name="suggestions")
-    async def lb_suggestions(self, ctx):
-        """Affiche les suggestions les mieux notées du salon des suggestions."""
-        salon = ctx.guild.get_channel(config.get("suggestion_channel", 0))
-        if not salon:
-            return await ctx.send(f"❌ Aucun salon de suggestions défini (`{PREFIX}setsuggestion #salon`).")
-        scores = []
-        async for msg in salon.history(limit=200):
-            if not msg.embeds or msg.embeds[0].title != "💡 Suggestion":
-                continue
-            # r.count - 1 : on retire la réaction du bot
-            pouces = {str(r.emoji): r.count - 1 for r in msg.reactions}
-            scores.append((pouces.get("👍", 0) - pouces.get("👎", 0), msg))
-        if not scores:
-            return await ctx.send("Aucune suggestion trouvée.")
-        scores.sort(key=lambda x: x[0], reverse=True)
-        lignes = [f"**{s:+d}** · {(msg.embeds[0].description or '')[:120]} · [lien]({msg.jump_url})"
-                  for s, msg in scores[:5]]
-        await ctx.send(embed=discord.Embed(title="🏆 Meilleures suggestions", description="\n".join(lignes),
-                                           color=discord.Color.gold()))
-
-
-# ---------------------------------------------------------------- ANTIRAID
-
-DANGER_PERMS = ("administrator", "manage_guild", "manage_roles", "manage_channels",
-                "ban_members", "kick_members", "manage_webhooks")
-PHISH_RE = re.compile(
-    r"(free\s*nitro|nitro\s*gratuit|discord\S*\.(gift|ru|xyz|click|top)|steam\S*\.(ru|gift|cc))",
-    re.IGNORECASE,
+BOT_NAME = "Mon Bot"
+EMBED_COLOR = 0x2B2D31
+OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").split(",") if x.strip().isdigit()}
+DATA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_data.json")
+MAX_TIMEOUT = 28 * 86400  # limite Discord pour un timeout
+DANGEROUS_PERMS = (
+    "administrator", "manage_guild", "manage_roles", "ban_members",
+    "kick_members", "manage_channels", "manage_webhooks",
 )
 
+PARAM_NOTE = (
+    "Les paramètres peuvent être des noms, des mentions, ou des IDs. "
+    "Si ce ne sont pas des mentions ils doivent être séparés par `,`"
+)
 
-def blrank_state():
-    return config.setdefault("blrank", {"enabled": False, "scope": "danger", "members": []})
-
-
-def antihack_state():
-    return config.setdefault("antihack", {"antiphish": False, "trap_channel": 0, "doublons": False})
-
-
-def is_dangerous(role):
-    return any(getattr(role.permissions, p) for p in DANGER_PERMS)
-
-
-class Antiraid(commands.Cog, name="Antiraid & antihack"):
-    """🛡️ Antiraid & antihack"""
-
-    # ---- Blacklist rank
-    @commands.group(name="blrank", invoke_without_command=True)
-    @commands.has_permissions(manage_roles=True)
-    async def blrank(self, ctx):
-        """Affiche l'état de la blacklist rank."""
-        st = blrank_state()
-        scope = "rôles dangereux" if st["scope"] == "danger" else "tous les rôles"
-        lines = [
-            f"Statut : {'activée' if st['enabled'] else 'désactivée'}",
-            f"Portée : {scope}",
-            f"Membres blacklistés : {len(st['members'])}",
-        ]
-        await ctx.send(embed=discord.Embed(title="🚫 Blacklist rank", description="\n".join(lines),
-                                           color=discord.Color.blurple()))
-
-    @blrank.command(name="on", aliases=["max"])
-    async def blrank_on(self, ctx):
-        """Active la blacklist rank."""
-        blrank_state()["enabled"] = True
-        save_json(CONFIG_FILE, config)
-        await ctx.send("🚫 Blacklist rank activée.")
-
-    @blrank.command(name="off")
-    async def blrank_off(self, ctx):
-        """Désactive la blacklist rank."""
-        blrank_state()["enabled"] = False
-        save_json(CONFIG_FILE, config)
-        await ctx.send("🚫 Blacklist rank désactivée.")
-
-    @blrank.command(name="danger")
-    async def blrank_danger(self, ctx):
-        """Ne bloque que les rôles dangereux (admin, ban, gestion des rôles…)."""
-        blrank_state()["scope"] = "danger"
-        save_json(CONFIG_FILE, config)
-        await ctx.send("🚫 Portée : rôles dangereux.")
-
-    @blrank.command(name="all")
-    async def blrank_all(self, ctx):
-        """Bloque tous les rôles pour les membres blacklistés."""
-        blrank_state()["scope"] = "all"
-        save_json(CONFIG_FILE, config)
-        await ctx.send("🚫 Portée : tous les rôles.")
-
-    @blrank.command(name="add")
-    async def blrank_add(self, ctx, member: discord.Member):
-        """Ajoute un membre à la blacklist rank."""
-        st = blrank_state()
-        if member.id in st["members"]:
-            return await ctx.send(f"{member.display_name} est déjà blacklisté.")
-        st["members"].append(member.id)
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"🚫 {member.mention} ajouté à la blacklist rank.")
-
-    @blrank.command(name="del")
-    async def blrank_del(self, ctx, member: discord.Member):
-        """Retire un membre de la blacklist rank."""
-        st = blrank_state()
-        if member.id not in st["members"]:
-            return await ctx.send(f"{member.display_name} n'est pas blacklisté.")
-        st["members"].remove(member.id)
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"✅ {member.mention} retiré de la blacklist rank.")
-
-    @commands.command()
-    @commands.has_permissions(manage_roles=True)
-    async def unbl(self, ctx, user_id: int):
-        """Retire un membre de la blacklist rank par son ID (même s'il a quitté le serveur)."""
-        st = blrank_state()
-        if user_id not in st["members"]:
-            return await ctx.send("❌ Cet ID n'est pas dans la blacklist rank.")
-        st["members"].remove(user_id)
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"✅ <@{user_id}> retiré de la blacklist rank.")
-
-    # ---- Panneau antihack
-    @commands.group(name="antihack", invoke_without_command=True)
-    @commands.has_permissions(administrator=True)
-    async def antihack(self, ctx):
-        """Panneau antihack : antiphish, salon piège, doublons."""
-        st = antihack_state()
-        trap = ctx.guild.get_channel(st["trap_channel"]) if st["trap_channel"] else None
-        embed = discord.Embed(title="🔐 Antihack",
-                              description="Protection contre les comptes piratés.",
-                              color=discord.Color.red())
-        embed.add_field(name="🎣 Antiphish", value="activé" if st["antiphish"] else "désactivé")
-        embed.add_field(name="🪤 Salon piège", value=trap.mention if trap else "non défini")
-        embed.add_field(name="👥 Doublons", value="activé" if st["doublons"] else "désactivé")
-        embed.set_footer(text=f"{PREFIX}antihack antiphish on/off · {PREFIX}antihack piege #salon · "
-                              f"{PREFIX}antihack doublons on/off")
-        await ctx.send(embed=embed)
-
-    @antihack.command(name="antiphish")
-    async def antihack_antiphish(self, ctx, etat: str):
-        """Supprime les liens de phishing connus et met leur auteur en timeout 1 h (on/off)."""
-        antihack_state()["antiphish"] = etat.lower() == "on"
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"🎣 Antiphish {'activé' if antihack_state()['antiphish'] else 'désactivé'}.")
-
-    @antihack.command(name="piege")
-    async def antihack_piege(self, ctx, channel: discord.TextChannel = None):
-        """Définit le salon piège : tout message posté dedans entraîne un ban. Sans salon : désactive."""
-        antihack_state()["trap_channel"] = channel.id if channel else 0
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"🪤 Salon piège : {channel.mention}" if channel else "🪤 Salon piège désactivé.")
-
-    @antihack.command(name="doublons")
-    async def antihack_doublons(self, ctx, etat: str):
-        """Signale les arrivées suspectes : compte récent ou pseudo identique à un membre (on/off)."""
-        antihack_state()["doublons"] = etat.lower() == "on"
-        save_json(CONFIG_FILE, config)
-        await ctx.send(f"👥 Détection des doublons {'activée' if antihack_state()['doublons'] else 'désactivée'}.")
-
-    # ---- Listeners
-    @commands.Cog.listener()
-    async def on_member_update(self, before, after):
-        st = blrank_state()
-        if not st["enabled"] or after.id not in st["members"]:
-            return
-        added = [r for r in after.roles if r not in before.roles and not r.is_default() and not r.managed]
-        if st["scope"] == "danger":
-            added = [r for r in added if is_dangerous(r)]
-        if not added:
-            return
-        try:
-            await after.remove_roles(*added, reason="Blacklist rank")
-        except discord.Forbidden:
-            return
-        await log_action(after.guild, "Blacklist rank",
-                         f"{after} a reçu {', '.join(r.name for r in added)} : rôle(s) retiré(s).",
-                         discord.Color.red())
-
-    @commands.Cog.listener()
-    async def on_message(self, message):
-        if not message.guild or message.author.bot:
-            return
-        st = antihack_state()
-        if st["trap_channel"] and message.channel.id == st["trap_channel"]:
-            try:
-                await message.delete()
-                await message.guild.ban(message.author, reason="Salon piège (antihack)", delete_message_days=1)
-            except discord.HTTPException:
-                return
-            await log_action(message.guild, "Salon piège", f"{message.author} banni (message dans le salon piège).",
-                             discord.Color.red())
-            return
-        if st["antiphish"] and PHISH_RE.search(message.content):
-            try:
-                await message.delete()
-            except discord.HTTPException:
-                return
-            try:
-                await message.author.timeout(discord.utils.utcnow() + datetime.timedelta(hours=1),
-                                             reason="Antiphish")
-            except discord.HTTPException:
-                pass
-            await message.channel.send(f"🎣 Lien suspect supprimé ({message.author.mention} en timeout 1 h).",
-                                       delete_after=8)
-            await log_action(message.guild, "Antiphish", f"Lien suspect de {message.author} supprimé.",
-                             discord.Color.red())
-
-    @commands.Cog.listener()
-    async def on_member_join(self, member):
-        if not antihack_state()["doublons"]:
-            return
-        alerts = []
-        age = discord.utils.utcnow() - member.created_at
-        if age < datetime.timedelta(days=7):
-            alerts.append(f"compte récent ({age.days} j)")
-        same = [m for m in member.guild.members
-                if m.id != member.id and m.name.lower() == member.name.lower()]
-        if same:
-            alerts.append(f"même pseudo que {', '.join(str(m) for m in same[:5])}")
-        if alerts:
-            await log_action(member.guild, "Doublon suspect", f"{member.mention} : " + " · ".join(alerts),
-                             discord.Color.red())
+# ============================================================
+# DONNÉES PERSISTANTES (fichier JSON local)
+# ============================================================
+def load_data() -> dict:
+    try:
+        with open(DATA_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 
-# ---------------------------------------------------------------- AIDE
-
-INTRO = ("*Les paramètres peuvent être des noms, des mentions ou des IDs.\n"
-         "Si ce ne sont pas des mentions, ils doivent être séparés par `, `.*")
-
-
-def help_footer():
-    name = bot.user.name if bot.user else "Gestion Bot"
-    return f"{name} • Préfixe actuel : {PREFIX}"
+DATA = load_data()
+for _key in ("sanctions", "notes", "blacklist", "blrank", "lockednames", "antiraid", "suggestions"):
+    DATA.setdefault(_key, {})
+DATA.setdefault("tempbans", [])
 
 
-def command_block(c):
-    sig = f" {c.signature}" if c.signature else ""
-    return f"**`{PREFIX}{c.name}{sig}`**\n{c.short_doc or 'Pas de description'}"
+def save() -> None:
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(DATA, f, ensure_ascii=False, indent=2)
 
 
-def build_category_pages(title, cmds, color=discord.Color.blurple(), first_intro=True):
-    """Découpe la liste d'une catégorie en plusieurs embeds (limite Discord)."""
-    chunks, current = [], ""
-    for c in cmds:
-        block = command_block(c) + "\n\n"
-        if len(current) + len(block) > 3500:
-            chunks.append(current)
-            current = ""
-        current += block
-    if current:
-        chunks.append(current)
-    if not chunks:
-        chunks = ["Aucune commande."]
-    pages = []
-    for i, body in enumerate(chunks):
-        intro = INTRO + "\n\n" if (first_intro and i == 0) else ""
-        pages.append(discord.Embed(title=title if i == 0 else f"{title} (suite)",
-                                   description=(intro + body).rstrip(), color=color))
-    return pages
+snipes: dict = {}          # channel_id -> dernier message supprimé
+recent_msgs: dict = {}     # (guild, user) -> [(contenu, timestamp)] pour doublons
+
+# ============================================================
+# CONTENU DU MENU D'AIDE
+# ============================================================
+CATEGORIES = {
+    "moderation": {
+        "label": "Modération", "emoji": "🛡️",
+        "description": "Sanctions et modération des membres",
+        "commands": [
+            ("sanctions <membre>", "Affiche les sanctions reçues par un membre"),
+            ("del sanction <membre> <numéro/all>", "Supprime une sanction ou toutes les sanctions"),
+            ("clear sanctions <membre>", "Supprime toutes les sanctions d'un membre"),
+            ("clear [nombre] [membre]", "Supprime le nombre de messages donné dans le salon actuel"),
+            ("note <membre> [raison]", "Ajoute une note de modération à un membre"),
+            ("note delete <membre> <nombre/all>", "Supprime une ou toutes les notes d'un membre"),
+            ("note delete all", "Supprime toutes les notes du serveur"),
+            ("warn <membre> [raison]", "Donne un warn à un membre"),
+            ("mute <membre> [raison]", "Mute un membre (timeout 28 jours)"),
+            ("unmute <membre>", "Met fin au mute d'un membre"),
+            ("tempmute <membre> <durée> [raison]", "Mute un membre pour une durée déterminée"),
+            ("kick <membre> [raison]", "Expulse un membre du serveur"),
+            ("ban <membre> [raison]", "Banni un membre du serveur"),
+            ("tempban <membre> <durée> [raison]", "Banni un membre pour une durée déterminée"),
+            ("unban <id>", "Enlève le bannissement d'un membre"),
+            ("banlist", "Affiche la liste des bannissements en cours"),
+            ("addrole <membre> <rôle>", "Ajoute un ou plusieurs rôles à un membre (séparés par ,)"),
+            ("delrole <membre> <rôle>", "Supprime un ou plusieurs rôles d'un membre (séparés par ,)"),
+            ("derank <membre>", "Supprime tous les rôles d'un membre"),
+            ("nick <membre> <nom>", "Change le pseudo d'un membre sur le serveur"),
+            ("lockname <membre>", "Verrouille le pseudo actuel d'un membre"),
+            ("unlockname <membre>", "Déverrouille le pseudo d'un membre"),
+            ("locknamelist", "Affiche la liste des membres ayant un pseudo verrouillé"),
+        ],
+    },
+    "configuration": {
+        "label": "Configuration du serveur", "emoji": "⚙️",
+        "description": "Permissions et réglages du serveur",
+        "commands": [
+            ("perms", "Affiche les rôles ayant des permissions sensibles sur le serveur"),
+        ],
+    },
+    "gestion": {
+        "label": "Gestion du serveur", "emoji": "🧰",
+        "description": "Outils de gestion vocale et serveur",
+        "commands": [
+            ("voicekick <membre>", "Déconnecte un membre de son salon vocal actuel"),
+        ],
+    },
+    "antiraid": {
+        "label": "Antiraid", "emoji": "🚨",
+        "description": "Protection anti-raid et blacklist rank",
+        "commands": [
+            ("antiraid", "Affiche l'état des modules : antiphish, salon piège, doublons"),
+            ("antiraid antiphish <on/off>", "Bloque les liens postés par les comptes récents (< 7 jours)"),
+            ("antiraid doublons <on/off>", "Détecte et sanctionne le spam de messages identiques"),
+            ("antiraid piege <#salon/off>", "Bannit quiconque écrit dans le salon piège"),
+            ("blrank", "Affiche la blacklist rank et son mode"),
+            ("blrank on/off", "Active ou désactive la blacklist rank"),
+            ("blrank danger/all", "Bloque seulement les rôles dangereux, ou tous les rôles"),
+            ("blrank add/del <membre>", "Ajoute ou retire un membre de la blacklist rank"),
+            ("clear blrank", "Retire tous les membres de la blacklist rank"),
+        ],
+    },
+    "controle": {
+        "label": "Contrôle du bot", "emoji": "🤖",
+        "description": "Gestion globale du bot (propriétaires)",
+        "commands": [
+            ("bl <membre> <raison>", "Ajoute quelqu'un à la blacklist, il sera banni de tous les serveurs du bot"),
+            ("bl", "Affiche la blacklist du bot"),
+            ("unbl <membre>", "Retire quelqu'un de la blacklist du bot"),
+            ("blinfo <membre>", "Affiche les informations de blacklist d'un membre"),
+        ],
+    },
+    "utilitaire": {
+        "label": "Utilitaire", "emoji": "🧩",
+        "description": "Outils divers : avatars, emojis, recherches",
+        "commands": [
+            ("pic [membre]", "Permet de récupérer la photo de profil de quelqu'un"),
+            ("banner [membre]", "Permet de récupérer la bannière de quelqu'un"),
+            ("server pic", "Permet de récupérer l'icône du serveur"),
+            ("server banner", "Permet de récupérer la bannière du serveur"),
+            ("emoji <emoji>", "Permet de récupérer l'image d'un émoji"),
+            ("snipe", "Affiche le dernier message supprimé du salon"),
+            ("image <mot-clé>", "Lance une recherche Google Images avec le mot-clé"),
+            ("suggestion <message>", "Poste une suggestion sur le serveur"),
+            ("lb suggestions", "Affiche les suggestions les mieux notées du serveur"),
+            ("wiki <mot-clé>", "Fait une recherche Wikipedia avec le mot-clé"),
+            ("calc <calcul>", "Permet de résoudre des calculs ou des équations"),
+            ("help [catégorie]", "Affiche l'aide par catégorie, ou l'aide sur une commande"),
+        ],
+    },
+}
+KEYS = list(CATEGORIES.keys())
 
 
-def build_all_pages():
-    overview = discord.Embed(
-        title="📖 Aide",
-        description=INTRO + f"\n\nUtilise les boutons ◀ ▶ pour parcourir les catégories, "
-                            f"ou `{PREFIX}help <catégorie>` pour aller directement à une catégorie.",
-        color=discord.Color.blurple(),
-    )
-    pages = [overview]
-    for name, cog in bot.cogs.items():
-        cmds = [c for c in cog.get_commands() if not c.hidden]
-        if cmds:
-            pages.extend(build_category_pages(f"{CATEGORY_EMOJIS.get(name, '📁')} {name} ({len(cmds)})", cmds,
-                                              first_intro=False))
-    return pages
+# ============================================================
+# HELPERS
+# ============================================================
+def simple_embed(text: str, color: int = EMBED_COLOR) -> discord.Embed:
+    return discord.Embed(description=text, color=color)
+
+
+def ok(text: str) -> discord.Embed:
+    return simple_embed(f"✅ {text}", 0x23A55A)
+
+
+def err(text: str) -> discord.Embed:
+    return simple_embed(f"❌ {text}", 0xF23F43)
+
+
+def footer(embed: discord.Embed) -> discord.Embed:
+    embed.set_footer(text=f"{BOT_NAME} • Préfixe actuel : {PREFIX}")
+    return embed
+
+
+def home_embed() -> discord.Embed:
+    lines = [f"{c['emoji']} **{c['label']}** — {c['description']}" for c in CATEGORIES.values()]
+    return footer(discord.Embed(
+        title=f"{BOT_NAME} — Menu d'aide",
+        description="Choisis une catégorie dans le menu ci-dessous.\n\n" + "\n".join(lines),
+        color=EMBED_COLOR,
+    ))
+
+
+def category_embed(key: str) -> discord.Embed:
+    cat = CATEGORIES[key]
+    body = [f"*{PARAM_NOTE}*", ""]
+    for cmd, desc in cat["commands"]:
+        body.append(f"**`{PREFIX}{cmd}`**\n{desc}\n")
+    return footer(discord.Embed(
+        title=f"{cat['emoji']} {cat['label']}",
+        description="\n".join(body)[:4096],
+        color=EMBED_COLOR,
+    ))
+
+
+def make_embed(index):
+    return home_embed() if index is None else category_embed(KEYS[index])
+
+
+def parse_duration(text: str):
+    """'10' ou '10m' -> minutes ; '2h', '1d', '30s' supportés."""
+    m = re.fullmatch(r"(\d+)\s*([smhdj]?)", text.strip().lower())
+    if not m:
+        return None
+    unit = m.group(2) or "m"
+    return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400, "j": 86400}[unit]
+
+
+def is_exempt(member: discord.Member) -> bool:
+    p = member.guild_permissions
+    return p.administrator or p.manage_guild
+
+
+def resolve_role(guild: discord.Guild, text: str):
+    text = text.strip()
+    m = re.search(r"\d{15,20}", text)
+    if m:
+        return guild.get_role(int(m.group()))
+    return discord.utils.get(guild.roles, name=text)
+
+
+async def fetch_user_from(text: str) -> discord.User:
+    m = re.search(r"\d{15,20}", text)
+    if not m:
+        raise commands.BadArgument("ID invalide")
+    return await bot.fetch_user(int(m.group()))
+
+
+def sanction_list(gid: int, uid: int) -> list:
+    return DATA["sanctions"].setdefault(str(gid), {}).setdefault(str(uid), [])
+
+
+def add_sanction(guild_id: int, user_id: int, kind: str, reason: str, mod_id: int) -> None:
+    sanction_list(guild_id, user_id).append({
+        "type": kind, "reason": reason, "mod": str(mod_id), "date": time.time(),
+    })
+    save()
+
+
+def get_blrank(gid: int) -> dict:
+    return DATA["blrank"].setdefault(str(gid), {"enabled": False, "mode": "danger", "members": []})
+
+
+def get_antiraid(gid: int) -> dict:
+    return DATA["antiraid"].setdefault(str(gid), {"antiphish": False, "doublons": False, "piege": None})
+
+
+def owner_only():
+    async def predicate(ctx):
+        if ctx.author.id not in OWNER_IDS:
+            raise commands.CheckFailure("owner")
+        return True
+    return commands.check(predicate)
+
+
+# ============================================================
+# VIEW DU MENU +help : select + boutons ◀ 🏠 ▶
+# ============================================================
+SELECT_OPTIONS = [
+    discord.SelectOption(label=c["label"], value=k, emoji=c["emoji"], description=c["description"][:100])
+    for k, c in CATEGORIES.items()
+]
 
 
 class HelpView(discord.ui.View):
-    """Boutons ◀ ▶ pour parcourir les pages d'aide. Seul l'auteur de la commande peut les utiliser."""
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.index = None
 
-    def __init__(self, pages, author_id):
-        super().__init__(timeout=300)
-        self.pages = pages
-        self.index = 0
-        self.author_id = author_id
-        for i, page in enumerate(self.pages):
-            page.set_footer(text=f"{help_footer()} • {i + 1}/{len(self.pages)}")
-        self.refresh()
-
-    def refresh(self):
-        for child in self.children:
-            if child.custom_id == "help_prev":
-                child.disabled = self.index == 0
-            elif child.custom_id == "help_next":
-                child.disabled = self.index >= len(self.pages) - 1
-
-    async def check(self, interaction):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "❌ Seul l'auteur de la commande peut utiliser ces boutons.", ephemeral=True)
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Ce menu n'est pas pour toi.", ephemeral=True)
             return False
         return True
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, custom_id="help_prev")
-    async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self.check(interaction):
-            return
-        self.index = max(0, self.index - 1)
-        self.refresh()
-        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+    @discord.ui.select(placeholder="Fais un choix", min_values=1, max_values=1, options=SELECT_OPTIONS)
+    async def choose(self, interaction: discord.Interaction, select: discord.ui.Select):
+        self.index = KEYS.index(select.values[0])
+        await interaction.response.edit_message(embed=make_embed(self.index), view=self)
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, custom_id="help_next")
-    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not await self.check(interaction):
-            return
-        self.index = min(len(self.pages) - 1, self.index + 1)
-        self.refresh()
-        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.primary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        n = len(KEYS)
+        self.index = n - 1 if self.index is None else (self.index - 1) % n
+        await interaction.response.edit_message(embed=make_embed(self.index), view=self)
 
+    @discord.ui.button(emoji="🏠", style=discord.ButtonStyle.secondary)
+    async def home_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index = None
+        await interaction.response.edit_message(embed=make_embed(self.index), view=self)
 
-@bot.command(name="help")
-async def help_cmd(ctx, *, sujet: str = None):
-    """Affiche la liste des commandes. +help <catégorie> ou +help <commande>."""
-    if sujet is None:
-        pages = build_all_pages()
-        return await ctx.send(embed=pages[0], view=HelpView(pages, ctx.author.id))
-
-    for name, cog in bot.cogs.items():
-        if name.lower() == sujet.lower() or name.lower().endswith(sujet.lower()):
-            cmds = [c for c in cog.get_commands() if not c.hidden]
-            pages = build_category_pages(f"{CATEGORY_EMOJIS.get(name, '📁')} {name}", cmds)
-            return await ctx.send(embed=pages[0], view=HelpView(pages, ctx.author.id))
-
-    cmd = bot.get_command(sujet)
-    if cmd:
-        sig = f" {cmd.signature}" if cmd.signature else ""
-        embed = discord.Embed(
-            title=f"{CATEGORY_EMOJIS.get(cmd.cog_name, '📁')} {cmd.cog_name or 'Commande'}",
-            description=f"**`{PREFIX}{cmd.name}{sig}`**\n{cmd.short_doc or 'Pas de description'}",
-            color=discord.Color.blurple(),
-        )
-        if cmd.aliases:
-            embed.add_field(name="Alias", value=" · ".join(f"`{PREFIX}{a}`" for a in cmd.aliases))
-        embed.set_footer(text=help_footer())
-        return await ctx.send(embed=embed)
-
-    await ctx.send(f"❌ Aucune catégorie ni commande « {sujet} ». Tape `{PREFIX}help`.")
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.primary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        n = len(KEYS)
+        self.index = 0 if self.index is None else (self.index + 1) % n
+        await interaction.response.edit_message(embed=make_embed(self.index), view=self)
 
 
-# ---------------------------------------------------------------- EVENTS
+# ============================================================
+# BOT
+# ============================================================
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.voice_states = True
+intents.reactions = True
+
+bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+
+
+@tasks.loop(seconds=60)
+async def check_tempbans():
+    """Débannit automatiquement les tempbans arrivés à échéance."""
+    now = time.time()
+    remaining = []
+    for t in DATA["tempbans"]:
+        if t["until"] <= now:
+            guild = bot.get_guild(t["gid"])
+            if guild:
+                try:
+                    await guild.unban(discord.Object(id=t["uid"]), reason="Fin du tempban")
+                except discord.HTTPException:
+                    pass
+        else:
+            remaining.append(t)
+    if len(remaining) != len(DATA["tempbans"]):
+        DATA["tempbans"] = remaining
+        save()
+
 
 @bot.event
 async def on_ready():
-    print(f"Connecté en tant que {bot.user} ({len(bot.guilds)} serveur(s))")
+    print(f"[OK] Connecté en tant que {bot.user} ({len(bot.guilds)} serveur(s))")
+    if not check_tempbans.is_running():
+        check_tempbans.start()
+    # Applique la blacklist globale sur tous les serveurs du bot
+    for uid, entry in DATA["blacklist"].items():
+        for guild in bot.guilds:
+            try:
+                await guild.ban(discord.Object(id=int(uid)), reason=f"Blacklist : {entry['reason']}")
+            except discord.HTTPException:
+                pass
 
 
 @bot.event
-async def on_member_join(member):
-    channel_id = config.get("welcome_channel")
-    channel = member.guild.get_channel(channel_id) if channel_id else None
-    if channel:
-        await channel.send(f"👋 Bienvenue {member.mention} sur **{member.guild.name}** !")
+async def on_member_join(member: discord.Member):
+    if str(member.id) in DATA["blacklist"]:
+        try:
+            await member.ban(reason="Blacklist du bot")
+        except discord.HTTPException:
+            pass
+
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    gid, uid = str(after.guild.id), str(after.id)
+
+    # Pseudo verrouillé
+    locked = DATA["lockednames"].get(gid, {}).get(uid)
+    if locked is not None and after.nick != locked:
+        try:
+            await after.edit(nick=locked, reason="Pseudo verrouillé")
+        except discord.HTTPException:
+            pass
+
+    # Blacklist rank : retire les rôles interdits
+    cfg = get_blrank(after.guild.id)
+    if cfg["enabled"] and after.id in cfg["members"]:
+        added = [r for r in after.roles if r not in before.roles and r != after.guild.default_role]
+        for role in added:
+            dangerous = any(getattr(role.permissions, p) for p in DANGEROUS_PERMS)
+            if cfg["mode"] == "all" or dangerous:
+                try:
+                    await after.remove_roles(role, reason="Blacklist rank")
+                except discord.HTTPException:
+                    pass
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    await _vote(payload, +1)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    await _vote(payload, -1)
+
+
+async def _vote(payload, delta: int):
+    if payload.guild_id is None or payload.user_id == bot.user.id or str(payload.emoji) != "👍":
+        return
+    for s in DATA["suggestions"].get(str(payload.guild_id), []):
+        if s["msg_id"] == payload.message_id:
+            s["up"] = max(0, s["up"] + delta)
+            save()
+            return
+
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.guild and not message.author.bot:
+        snipes[message.channel.id] = (message.content, message.author, time.time())
+
+
+async def antiraid_check(message: discord.Message) -> bool:
+    """Retourne True si le message a été traité par l'antiraid."""
+    member = message.author
+    if not isinstance(member, discord.Member) or is_exempt(member):
+        return False
+    cfg = get_antiraid(message.guild.id)
+
+    # Salon piège
+    if cfg["piege"] and message.channel.id == cfg["piege"]:
+        try:
+            await message.delete()
+            await member.ban(reason="Salon piège (antiraid)")
+        except discord.HTTPException:
+            pass
+        return True
+
+    # Antiphish : liens postés par un compte de moins de 7 jours
+    if cfg["antiphish"] and "http" in message.content.lower():
+        age = discord.utils.utcnow() - member.created_at
+        if age < timedelta(days=7):
+            try:
+                await message.delete()
+                await member.timeout(discord.utils.utcnow() + timedelta(hours=1), reason="Antiphish")
+            except discord.HTTPException:
+                pass
+            return True
+
+    # Doublons : 3 messages identiques en moins de 10 secondes
+    if cfg["doublons"]:
+        key = f"{message.guild.id}:{member.id}"
+        now = time.time()
+        history = [(c, t) for c, t in recent_msgs.get(key, []) if now - t < 10]
+        history.append((message.content, now))
+        recent_msgs[key] = history[-5:]
+        same = [c for c, _ in history if c == message.content]
+        if len(same) >= 3:
+            try:
+                await message.delete()
+                await member.timeout(discord.utils.utcnow() + timedelta(minutes=10), reason="Spam (doublons)")
+            except discord.HTTPException:
+                pass
+            return True
+    return False
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.guild and not message.author.bot:
+        if await antiraid_check(message):
+            return
+    await bot.process_commands(message)
 
 
 @bot.event
@@ -1380,118 +462,654 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("❌ Tu n'as pas la permission d'utiliser cette commande.")
-    elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
-        await ctx.send(f"❌ Arguments invalides. Tape `{PREFIX}help {ctx.command}`.")
+        await ctx.send(embed=err("Tu n'as pas la permission pour cette commande."))
+    elif isinstance(error, commands.CheckFailure):
+        await ctx.send(embed=err("Cette commande est réservée aux propriétaires du bot."))
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(embed=err(f"Argument manquant. Regarde `{PREFIX}help`."))
+    elif isinstance(error, (commands.BadArgument, commands.MemberNotFound, commands.UserNotFound)):
+        await ctx.send(embed=err(f"Argument invalide. Regarde `{PREFIX}help`."))
+    elif isinstance(error, discord.Forbidden):
+        await ctx.send(embed=err("Je n'ai pas les permissions (vérifie la hiérarchie des rôles)."))
     else:
-        print(f"Erreur dans {ctx.command}: {error}")
-        await ctx.send("❌ Une erreur est survenue.")
+        print(f"[ERREUR] {error}")
 
 
-# ---------------------------------------------------------------- SITE WEB (Render)
+# ============================================================
+# MENU D'AIDE
+# ============================================================
+@bot.command(name="help")
+async def help_cmd(ctx: commands.Context, *, sujet: str = None):
+    if sujet is None:
+        return await ctx.send(embed=home_embed(), view=HelpView(ctx.author.id))
+    key = sujet.lower()
+    for k, c in CATEGORIES.items():
+        if key in (k, c["label"].lower()):
+            return await ctx.send(embed=category_embed(k))
+    for c in CATEGORIES.values():
+        for cmd, desc in c["commands"]:
+            if cmd.split(" ")[0].lower() == key.split(" ")[0]:
+                return await ctx.send(embed=footer(discord.Embed(
+                    title=f"{PREFIX}{cmd}", description=desc, color=EMBED_COLOR)))
+    await ctx.send(embed=err(f"Aucune commande ou catégorie « {sujet} »."))
 
-import html as html_lib
-import http.server
-import threading
 
-START_TIME = time.time()
-
-
-def build_status_page():
-    ready = bot.is_ready()
-    guilds = bot.guilds if ready else []
-    members = sum(g.member_count or 0 for g in guilds)
-    latency = f"{round(bot.latency * 1000)} ms" if ready else "-"
-    uptime = str(datetime.timedelta(seconds=int(time.time() - START_TIME)))
-    commands_count = len({c.qualified_name for c in bot.walk_commands()})
-    name = html_lib.escape(str(bot.user)) if bot.user else "Gestion Bot"
-    status, color = ("En ligne", "#3ba55d") if ready else ("Démarrage...", "#faa61a")
-    cards = [
-        ("Statut", status),
-        ("Serveurs", len(guilds)),
-        ("Membres", members),
-        ("Latence", latency),
-        ("Uptime", uptime),
-        ("Commandes", commands_count),
+# ============================================================
+# MODÉRATION
+# ============================================================
+@bot.command(name="sanctions")
+@commands.has_permissions(manage_messages=True)
+async def sanctions(ctx, membre: discord.Member):
+    items = sanction_list(ctx.guild.id, membre.id)
+    if not items:
+        return await ctx.send(embed=ok(f"{membre} n'a aucune sanction."))
+    lines = [
+        f"**{i}.** `{s['type']}` — {s['reason']} *({datetime.fromtimestamp(s['date']):%d/%m/%Y %H:%M})*"
+        for i, s in enumerate(items, 1)
     ]
-    cards_html = "".join(
-        f'<div class="card"><span>{html_lib.escape(str(k))}</span><strong>{html_lib.escape(str(v))}</strong></div>'
-        for k, v in cards
-    )
+    await ctx.send(embed=discord.Embed(title=f"Sanctions de {membre}", description="\n".join(lines)[:4096], color=EMBED_COLOR))
+
+
+@bot.group(name="del", invoke_without_command=True)
+async def del_group(ctx):
+    await ctx.send(embed=simple_embed(f"Utilise `{PREFIX}del sanction <membre> <numéro/all>`."))
+
+
+@del_group.command(name="sanction")
+@commands.has_permissions(manage_messages=True)
+async def del_sanction(ctx, membre: discord.Member, numero: str):
+    items = sanction_list(ctx.guild.id, membre.id)
+    if numero.lower() == "all":
+        items.clear()
+    else:
+        if not numero.isdigit() or not (1 <= int(numero) <= len(items)):
+            return await ctx.send(embed=err("Numéro de sanction invalide."))
+        items.pop(int(numero) - 1)
+    save()
+    await ctx.send(embed=ok("Sanction(s) supprimée(s)."))
+
+
+@bot.group(name="clear", invoke_without_command=True)
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, nombre: int = 10, membre: discord.Member = None):
+    nombre = max(1, min(nombre, 500))
+
+    def check(m: discord.Message) -> bool:
+        return membre is None or m.author.id == membre.id
+
+    deleted = await ctx.channel.purge(limit=nombre, check=check, before=ctx.message)
+    await ctx.send(embed=ok(f"{len(deleted)} message(s) supprimé(s)."), delete_after=5)
+
+
+@clear.command(name="sanctions")
+@commands.has_permissions(manage_messages=True)
+async def clear_sanctions(ctx, membre: discord.Member):
+    DATA["sanctions"].get(str(ctx.guild.id), {}).pop(str(membre.id), None)
+    save()
+    await ctx.send(embed=ok(f"Sanctions de {membre} supprimées."))
+
+
+@clear.command(name="blrank")
+@commands.has_permissions(manage_roles=True)
+async def clear_blrank(ctx):
+    get_blrank(ctx.guild.id)["members"] = []
+    save()
+    await ctx.send(embed=ok("Blacklist rank vidée."))
+
+
+@bot.group(name="note", invoke_without_command=True)
+@commands.has_permissions(manage_messages=True)
+async def note(ctx, membre: discord.Member, *, raison: str = "Aucune raison"):
+    DATA["notes"].setdefault(str(ctx.guild.id), {}).setdefault(str(membre.id), []).append({
+        "raison": raison, "mod": str(ctx.author.id), "date": time.time(),
+    })
+    save()
+    await ctx.send(embed=ok(f"Note ajoutée à {membre}."))
+
+
+@note.command(name="delete")
+@commands.has_permissions(manage_messages=True)
+async def note_delete(ctx, cible: str, nombre: str = None):
+    gid = str(ctx.guild.id)
+    if cible.lower() == "all" and nombre is None:
+        DATA["notes"][gid] = {}
+        save()
+        return await ctx.send(embed=ok("Toutes les notes du serveur ont été supprimées."))
+    membre = await commands.MemberConverter().convert(ctx, cible)
+    lst = DATA["notes"].get(gid, {}).get(str(membre.id), [])
+    if nombre is None or nombre.lower() == "all":
+        lst.clear()
+    elif nombre.isdigit() and 1 <= int(nombre) <= len(lst):
+        lst.pop(int(nombre) - 1)
+    else:
+        return await ctx.send(embed=err("Numéro de note invalide."))
+    save()
+    await ctx.send(embed=ok(f"Note(s) de {membre} supprimée(s)."))
+
+
+@bot.command(name="warn")
+@commands.has_permissions(kick_members=True)
+async def warn(ctx, membre: discord.Member, *, raison: str = "Aucune raison"):
+    add_sanction(ctx.guild.id, membre.id, "warn", raison, ctx.author.id)
+    await ctx.send(embed=simple_embed(f"⚠️ {membre} a reçu un warn.\nRaison : {raison}", 0xFEE75C))
+
+
+@bot.command(name="mute")
+@commands.has_permissions(moderate_members=True)
+async def mute(ctx, membre: discord.Member, *, raison: str = "Aucune raison"):
+    await membre.timeout(discord.utils.utcnow() + timedelta(seconds=MAX_TIMEOUT), reason=raison)
+    add_sanction(ctx.guild.id, membre.id, "mute", raison, ctx.author.id)
+    await ctx.send(embed=simple_embed(f"🔇 {membre} a été mute.\nRaison : {raison}"))
+
+
+@bot.command(name="unmute")
+@commands.has_permissions(moderate_members=True)
+async def unmute(ctx, membre: discord.Member):
+    await membre.timeout(None, reason=f"Unmute par {ctx.author}")
+    await ctx.send(embed=ok(f"{membre} n'est plus mute."))
+
+
+@bot.command(name="tempmute")
+@commands.has_permissions(moderate_members=True)
+async def tempmute(ctx, membre: discord.Member, duree: str, *, raison: str = "Aucune raison"):
+    secondes = parse_duration(duree)
+    if not secondes:
+        return await ctx.send(embed=err("Durée invalide (ex : `10m`, `2h`, `1d`)."))
+    secondes = min(secondes * (1 if duree[-1].isalpha() else 60), MAX_TIMEOUT)
+    await membre.timeout(discord.utils.utcnow() + timedelta(seconds=secondes), reason=raison)
+    add_sanction(ctx.guild.id, membre.id, f"tempmute {duree}", raison, ctx.author.id)
+    await ctx.send(embed=simple_embed(f"🔇 {membre} mute pour {duree}.\nRaison : {raison}"))
+
+
+@bot.command(name="kick")
+@commands.has_permissions(kick_members=True)
+async def kick(ctx, membre: discord.Member, *, raison: str = "Aucune raison"):
+    await membre.kick(reason=f"{ctx.author} : {raison}")
+    add_sanction(ctx.guild.id, membre.id, "kick", raison, ctx.author.id)
+    await ctx.send(embed=simple_embed(f"👢 {membre} a été expulsé.\nRaison : {raison}"))
+
+
+@bot.command(name="ban")
+@commands.has_permissions(ban_members=True)
+async def ban(ctx, membre: discord.Member, *, raison: str = "Aucune raison"):
+    await membre.ban(reason=f"{ctx.author} : {raison}")
+    add_sanction(ctx.guild.id, membre.id, "ban", raison, ctx.author.id)
+    await ctx.send(embed=simple_embed(f"🔨 {membre} a été banni.\nRaison : {raison}"))
+
+
+@bot.command(name="tempban")
+@commands.has_permissions(ban_members=True)
+async def tempban(ctx, membre: discord.Member, duree: str, *, raison: str = "Aucune raison"):
+    secondes = parse_duration(duree)
+    if not secondes:
+        return await ctx.send(embed=err("Durée invalide (ex : `10m`, `2h`, `1d`)."))
+    secondes = secondes * (1 if duree[-1].isalpha() else 60)
+    await membre.ban(reason=f"Tempban {duree} : {raison}")
+    DATA["tempbans"].append({"gid": ctx.guild.id, "uid": membre.id, "until": time.time() + secondes})
+    add_sanction(ctx.guild.id, membre.id, f"tempban {duree}", raison, ctx.author.id)
+    await ctx.send(embed=simple_embed(f"🔨 {membre} est banni pour {duree}.\nRaison : {raison}"))
+
+
+@bot.command(name="unban")
+@commands.has_permissions(ban_members=True)
+async def unban(ctx, cible: str):
+    user = await fetch_user_from(cible)
+    await ctx.guild.unban(discord.Object(id=user.id), reason=f"Unban par {ctx.author}")
+    DATA["tempbans"] = [t for t in DATA["tempbans"] if not (t["gid"] == ctx.guild.id and t["uid"] == user.id)]
+    save()
+    await ctx.send(embed=ok(f"Bannissement retiré pour {user}."))
+
+
+@bot.command(name="banlist")
+@commands.has_permissions(ban_members=True)
+async def banlist(ctx):
+    entries = [e async for e in ctx.guild.bans(limit=20)]
+    if not entries:
+        return await ctx.send(embed=simple_embed("Aucun bannissement en cours."))
+    lines = [f"`{e.user.id}` **{e.user}** — {e.reason or 'Aucune raison'}" for e in entries]
+    await ctx.send(embed=discord.Embed(title="🔨 Bannissements", description="\n".join(lines), color=EMBED_COLOR))
+
+
+@bot.command(name="addrole")
+@commands.has_permissions(manage_roles=True)
+async def addrole(ctx, membre: discord.Member, *, roles: str):
+    found = [resolve_role(ctx.guild, r) for r in roles.split(",") if r.strip()]
+    found = [r for r in found if r]
+    if not found:
+        return await ctx.send(embed=err("Aucun rôle reconnu."))
+    await membre.add_roles(*found, reason=f"Par {ctx.author}")
+    await ctx.send(embed=ok(f"Rôle(s) ajouté(s) à {membre}."))
+
+
+@bot.command(name="delrole")
+@commands.has_permissions(manage_roles=True)
+async def delrole(ctx, membre: discord.Member, *, roles: str):
+    found = [resolve_role(ctx.guild, r) for r in roles.split(",") if r.strip()]
+    found = [r for r in found if r]
+    if not found:
+        return await ctx.send(embed=err("Aucun rôle reconnu."))
+    await membre.remove_roles(*found, reason=f"Par {ctx.author}")
+    await ctx.send(embed=ok(f"Rôle(s) retiré(s) à {membre}."))
+
+
+@bot.command(name="derank")
+@commands.has_permissions(manage_roles=True)
+async def derank(ctx, membre: discord.Member):
+    roles = [r for r in membre.roles if r != ctx.guild.default_role and not r.managed]
+    if roles:
+        await membre.remove_roles(*roles, reason=f"Derank par {ctx.author}")
+    await ctx.send(embed=ok(f"Rôles de {membre} retirés."))
+
+
+@bot.command(name="nick")
+@commands.has_permissions(manage_nicknames=True)
+async def nick(ctx, membre: discord.Member, *, pseudo: str):
+    await membre.edit(nick=pseudo)
+    await ctx.send(embed=ok(f"Pseudo de {membre} changé en **{pseudo}**."))
+
+
+@bot.command(name="lockname")
+@commands.has_permissions(manage_nicknames=True)
+async def lockname(ctx, membre: discord.Member):
+    DATA["lockednames"].setdefault(str(ctx.guild.id), {})[str(membre.id)] = membre.nick or membre.name
+    save()
+    await ctx.send(embed=ok(f"Pseudo de {membre} verrouillé."))
+
+
+@bot.command(name="unlockname")
+@commands.has_permissions(manage_nicknames=True)
+async def unlockname(ctx, membre: discord.Member):
+    DATA["lockednames"].get(str(ctx.guild.id), {}).pop(str(membre.id), None)
+    save()
+    await ctx.send(embed=ok(f"Pseudo de {membre} déverrouillé."))
+
+
+@bot.command(name="locknamelist")
+@commands.has_permissions(manage_nicknames=True)
+async def locknamelist(ctx):
+    locks = DATA["lockednames"].get(str(ctx.guild.id), {})
+    if not locks:
+        return await ctx.send(embed=simple_embed("Aucun pseudo verrouillé."))
+    lines = [f"<@{uid}> → **{name}**" for uid, name in locks.items()]
+    await ctx.send(embed=discord.Embed(title="🔒 Pseudos verrouillés", description="\n".join(lines), color=EMBED_COLOR))
+
+
+# ============================================================
+# CONFIGURATION / GESTION
+# ============================================================
+@bot.command(name="perms")
+@commands.has_permissions(manage_guild=True)
+async def perms(ctx):
+    lines = []
+    for role in ctx.guild.roles:
+        if role == ctx.guild.default_role:
+            continue
+        flags = [p.replace("_", " ") for p in DANGEROUS_PERMS if getattr(role.permissions, p)]
+        if flags:
+            lines.append(f"{role.mention} — {', '.join(flags)}")
+    await ctx.send(embed=discord.Embed(
+        title="⚙️ Rôles sensibles", description="\n".join(lines)[:4096] or "Aucun rôle sensible.", color=EMBED_COLOR))
+
+
+@bot.command(name="voicekick")
+@commands.has_permissions(move_members=True)
+async def voicekick(ctx, membre: discord.Member):
+    if not membre.voice:
+        return await ctx.send(embed=err(f"{membre} n'est dans aucun salon vocal."))
+    await membre.move_to(None, reason=f"Voicekick par {ctx.author}")
+    await ctx.send(embed=ok(f"{membre} a été déconnecté du vocal."))
+
+
+# ============================================================
+# ANTIRAID
+# ============================================================
+@bot.command(name="antiraid")
+@commands.has_permissions(administrator=True)
+async def antiraid(ctx, option: str = None, valeur: str = None):
+    cfg = get_antiraid(ctx.guild.id)
+    if option is None:
+        piege = f"<#{cfg['piege']}>" if cfg["piege"] else "désactivé"
+        return await ctx.send(embed=footer(discord.Embed(
+            title="🚨 Antiraid",
+            description=(f"**Antiphish** : {'on' if cfg['antiphish'] else 'off'}\n"
+                         f"**Doublons** : {'on' if cfg['doublons'] else 'off'}\n"
+                         f"**Salon piège** : {piege}"),
+            color=EMBED_COLOR)))
+
+    option = option.lower()
+    if option in ("antiphish", "doublons"):
+        if valeur not in ("on", "off"):
+            return await ctx.send(embed=err("Utilise `on` ou `off`."))
+        cfg[option] = valeur == "on"
+    elif option == "piege":
+        if valeur is None or valeur.lower() == "off":
+            cfg["piege"] = None
+        else:
+            m = re.search(r"\d{15,20}", valeur)
+            if not m or not ctx.guild.get_channel(int(m.group())):
+                return await ctx.send(embed=err("Salon introuvable."))
+            cfg["piege"] = int(m.group())
+    else:
+        return await ctx.send(embed=err("Option inconnue : `antiphish`, `doublons` ou `piege`."))
+    save()
+    await ctx.send(embed=ok("Antiraid mis à jour."))
+
+
+@bot.group(name="blrank", invoke_without_command=True)
+async def blrank(ctx):
+    cfg = get_blrank(ctx.guild.id)
+    members = "\n".join(f"<@{uid}>" for uid in cfg["members"]) or "Aucun membre."
+    await ctx.send(embed=footer(discord.Embed(
+        title="🚫 Blacklist rank",
+        description=(f"**Statut** : {'on' if cfg['enabled'] else 'off'}\n"
+                     f"**Mode** : {cfg['mode']}\n\n{members}"),
+        color=EMBED_COLOR)))
+
+
+@blrank.command(name="on")
+@commands.has_permissions(manage_roles=True)
+async def blrank_on(ctx):
+    get_blrank(ctx.guild.id)["enabled"] = True
+    save()
+    await ctx.send(embed=ok("Blacklist rank activée."))
+
+
+@blrank.command(name="off")
+@commands.has_permissions(manage_roles=True)
+async def blrank_off(ctx):
+    get_blrank(ctx.guild.id)["enabled"] = False
+    save()
+    await ctx.send(embed=ok("Blacklist rank désactivée."))
+
+
+@blrank.command(name="danger")
+@commands.has_permissions(manage_roles=True)
+async def blrank_danger(ctx):
+    get_blrank(ctx.guild.id)["mode"] = "danger"
+    save()
+    await ctx.send(embed=ok("Mode : rôles dangereux seulement."))
+
+
+@blrank.command(name="all")
+@commands.has_permissions(manage_roles=True)
+async def blrank_all(ctx):
+    get_blrank(ctx.guild.id)["mode"] = "all"
+    save()
+    await ctx.send(embed=ok("Mode : tous les rôles."))
+
+
+@blrank.command(name="add")
+@commands.has_permissions(manage_roles=True)
+async def blrank_add(ctx, membre: discord.Member):
+    cfg = get_blrank(ctx.guild.id)
+    if membre.id not in cfg["members"]:
+        cfg["members"].append(membre.id)
+    save()
+    await ctx.send(embed=ok(f"{membre} ajouté à la blacklist rank."))
+
+
+@blrank.command(name="del")
+@commands.has_permissions(manage_roles=True)
+async def blrank_del(ctx, membre: discord.Member):
+    cfg = get_blrank(ctx.guild.id)
+    if membre.id in cfg["members"]:
+        cfg["members"].remove(membre.id)
+    save()
+    await ctx.send(embed=ok(f"{membre} retiré de la blacklist rank."))
+
+
+# ============================================================
+# CONTRÔLE DU BOT (propriétaires)
+# ============================================================
+@bot.group(name="bl", invoke_without_command=True)
+@owner_only()
+async def bl(ctx, cible: str = None, *, raison: str = "Aucune raison"):
+    if cible is None:
+        if not DATA["blacklist"]:
+            return await ctx.send(embed=simple_embed("La blacklist du bot est vide."))
+        lines = [f"`{uid}` — {e['reason']}" for uid, e in list(DATA["blacklist"].items())[:30]]
+        return await ctx.send(embed=discord.Embed(title="🚫 Blacklist du bot", description="\n".join(lines), color=EMBED_COLOR))
+    user = await fetch_user_from(cible)
+    DATA["blacklist"][str(user.id)] = {"reason": raison, "by": str(ctx.author.id), "date": time.time()}
+    save()
+    banned = 0
+    for guild in bot.guilds:
+        try:
+            await guild.ban(discord.Object(id=user.id), reason=f"Blacklist : {raison}")
+            banned += 1
+        except discord.HTTPException:
+            pass
+    await ctx.send(embed=ok(f"{user} blacklisté et banni sur {banned} serveur(s)."))
+
+
+@bot.command(name="unbl")
+@owner_only()
+async def unbl(ctx, cible: str):
+    user = await fetch_user_from(cible)
+    if DATA["blacklist"].pop(str(user.id), None) is None:
+        return await ctx.send(embed=err("Cet utilisateur n'est pas blacklisté."))
+    save()
+    for guild in bot.guilds:
+        try:
+            await guild.unban(discord.Object(id=user.id), reason="Retiré de la blacklist")
+        except discord.HTTPException:
+            pass
+    await ctx.send(embed=ok(f"{user} retiré de la blacklist."))
+
+
+@bot.command(name="blinfo")
+@owner_only()
+async def blinfo(ctx, cible: str):
+    user = await fetch_user_from(cible)
+    entry = DATA["blacklist"].get(str(user.id))
+    if not entry:
+        return await ctx.send(embed=simple_embed(f"{user} n'est pas blacklisté."))
+    await ctx.send(embed=discord.Embed(
+        title=f"Blacklist — {user}",
+        description=(f"**Raison** : {entry['reason']}\n"
+                     f"**Ajouté par** : <@{entry['by']}>\n"
+                     f"**Date** : {datetime.fromtimestamp(entry['date']):%d/%m/%Y %H:%M}"),
+        color=EMBED_COLOR))
+
+
+# ============================================================
+# UTILITAIRE
+# ============================================================
+@bot.command(name="pic")
+async def pic(ctx, membre: discord.Member = None):
+    membre = membre or ctx.author
+    embed = discord.Embed(title=f"Avatar de {membre}", color=EMBED_COLOR)
+    embed.set_image(url=membre.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="banner")
+async def banner(ctx, membre: discord.Member = None):
+    membre = membre or ctx.author
+    user = await bot.fetch_user(membre.id)
+    if not user.banner:
+        return await ctx.send(embed=simple_embed(f"{membre} n'a pas de bannière."))
+    embed = discord.Embed(title=f"Bannière de {membre}", color=EMBED_COLOR)
+    embed.set_image(url=user.banner.url)
+    await ctx.send(embed=embed)
+
+
+@bot.group(name="server", invoke_without_command=True)
+async def server(ctx):
+    await ctx.send(embed=simple_embed(f"Utilise `{PREFIX}server pic` ou `{PREFIX}server banner`."))
+
+
+@server.command(name="pic")
+async def server_pic(ctx):
+    if not ctx.guild.icon:
+        return await ctx.send(embed=simple_embed("Ce serveur n'a pas d'icône."))
+    embed = discord.Embed(title=f"Icône de {ctx.guild.name}", color=EMBED_COLOR)
+    embed.set_image(url=ctx.guild.icon.url)
+    await ctx.send(embed=embed)
+
+
+@server.command(name="banner")
+async def server_banner(ctx):
+    if not ctx.guild.banner:
+        return await ctx.send(embed=simple_embed("Ce serveur n'a pas de bannière."))
+    embed = discord.Embed(title=f"Bannière de {ctx.guild.name}", color=EMBED_COLOR)
+    embed.set_image(url=ctx.guild.banner.url)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="emoji")
+async def emoji(ctx, emoji_str: str):
+    match = re.match(r"<(a?):(\w+):(\d+)>", emoji_str)
+    if not match:
+        return await ctx.send(embed=simple_embed("Donne un émoji personnalisé du serveur."))
+    animated, name, eid = match.groups()
+    ext = "gif" if animated else "png"
+    embed = discord.Embed(title=f":{name}:", color=EMBED_COLOR)
+    embed.set_image(url=f"https://cdn.discordapp.com/emojis/{eid}.{ext}?size=256")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="snipe")
+async def snipe(ctx):
+    data = snipes.get(ctx.channel.id)
+    if not data:
+        return await ctx.send(embed=simple_embed("Rien à sniper dans ce salon."))
+    content, author, ts = data
+    embed = discord.Embed(description=content or "*(vide)*", color=EMBED_COLOR, timestamp=datetime.fromtimestamp(ts))
+    embed.set_author(name=str(author), icon_url=author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="image")
+async def image(ctx, *, mot: str):
+    url = f"https://www.google.com/search?tbm=isch&q={quote(mot)}"
+    await ctx.send(embed=simple_embed(f"🔎 Recherche d'images pour **{mot}** :\n{url}"))
+
+
+@bot.command(name="suggestion")
+async def suggestion(ctx, *, message: str):
+    embed = footer(discord.Embed(title="💡 Suggestion", description=message, color=EMBED_COLOR))
+    embed.set_author(name=str(ctx.author), icon_url=ctx.author.display_avatar.url)
+    msg = await ctx.send(embed=embed)
+    await msg.add_reaction("👍")
+    await msg.add_reaction("👎")
+    DATA["suggestions"].setdefault(str(ctx.guild.id), []).append({
+        "msg_id": msg.id, "author": str(ctx.author.id), "content": message, "up": 0,
+    })
+    save()
+
+
+@bot.group(name="lb", invoke_without_command=True)
+async def lb(ctx):
+    await ctx.send(embed=simple_embed(f"Utilise `{PREFIX}lb suggestions`."))
+
+
+@lb.command(name="suggestions")
+async def lb_suggestions(ctx):
+    items = sorted(DATA["suggestions"].get(str(ctx.guild.id), []), key=lambda s: s["up"], reverse=True)[:10]
+    if not items:
+        return await ctx.send(embed=simple_embed("Aucune suggestion pour le moment."))
+    lines = [f"**{i}.** 👍 {s['up']} — {s['content'][:80]} (<@{s['author']}>)" for i, s in enumerate(items, 1)]
+    await ctx.send(embed=discord.Embed(title="🏆 Meilleures suggestions", description="\n".join(lines), color=EMBED_COLOR))
+
+
+@bot.command(name="wiki")
+async def wiki(ctx, *, mot: str):
+    url = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{quote(mot)}"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers={"User-Agent": f"{BOT_NAME}/1.0"}) as resp:
+            if resp.status != 200:
+                return await ctx.send(embed=err(f"Aucun article trouvé pour « {mot} »."))
+            data = await resp.json()
+    embed = discord.Embed(title=data.get("title", mot), description=data.get("extract", "")[:900], color=EMBED_COLOR)
+    page = data.get("content_urls", {}).get("desktop", {}).get("page")
+    if page:
+        embed.url = page
+    await ctx.send(embed=footer(embed))
+
+
+_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod,
+    ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos,
+}
+
+
+def _safe_eval(node):
+    if isinstance(node, ast.Expression):
+        return _safe_eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+        right = _safe_eval(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 1000:
+            raise ValueError("Exposant trop grand")
+        return _OPS[type(node.op)](_safe_eval(node.left), right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_safe_eval(node.operand))
+    raise ValueError("Expression non autorisée")
+
+
+@bot.command(name="calc")
+async def calc(ctx, *, expression: str):
+    expr = expression.replace("×", "*").replace("÷", "/").replace("^", "**").replace(",", ".")
+    try:
+        result = _safe_eval(ast.parse(expr, mode="eval"))
+    except (ValueError, SyntaxError, ZeroDivisionError, TypeError) as e:
+        return await ctx.send(embed=err(f"Calcul impossible : {e}"))
+    await ctx.send(embed=discord.Embed(title="🧮 Calcul", description=f"`{expression}` = **{result}**", color=EMBED_COLOR))
+
+
+# ============================================================
+# MINI SITE WEB (pour Render)
+# ============================================================
+app = Flask(__name__)
+
+
+@app.route("/")
+def home():
+    online = bot.is_ready()
+    guilds = len(bot.guilds) if online else 0
+    status_text = "En ligne" if online else "Démarrage..."
+    dot_color = "#23a55a" if online else "#f23f43"
     return f"""<!doctype html>
 <html lang="fr">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{name}</title>
-<style>
-  body {{ margin:0; font-family: system-ui, sans-serif; background:#1e1f22; color:#f2f3f5;
-         display:flex; min-height:100vh; align-items:center; justify-content:center; }}
-  main {{ width:min(720px, 92vw); text-align:center; }}
-  h1 {{ margin:0 0 .3rem; }}
-  .badge {{ display:inline-block; padding:.3rem .8rem; border-radius:999px; background:{color};
-           color:#111; font-weight:600; margin-bottom:1.5rem; }}
-  .grid {{ display:grid; grid-template-columns:repeat(auto-fit, minmax(150px,1fr)); gap:12px; }}
-  .card {{ background:#2b2d31; border-radius:12px; padding:1rem; display:flex; flex-direction:column; gap:.4rem; }}
-  .card span {{ color:#b5bac1; font-size:.85rem; }}
-  .card strong {{ font-size:1.3rem; }}
-  footer {{ margin-top:1.5rem; color:#949ba4; font-size:.85rem; }}
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{BOT_NAME}</title>
+  <style>
+    body {{ background:#1e1f22; color:#dbdee1; font-family:system-ui,sans-serif;
+            display:flex; min-height:100vh; align-items:center; justify-content:center; margin:0; }}
+    .card {{ background:#2b2d31; padding:32px; border-radius:12px; text-align:center; max-width:360px; }}
+    .dot {{ display:inline-block; width:10px; height:10px; border-radius:50%;
+            background:{dot_color}; margin-right:6px; }}
+  </style>
 </head>
 <body>
-<main>
-  <h1>{name}</h1>
-  <div class="badge">{status}</div>
-  <div class="grid">{cards_html}</div>
-  <footer>Préfixe : {PREFIX} · Aide : {PREFIX}help</footer>
-</main>
+  <div class="card">
+    <h1>{BOT_NAME}</h1>
+    <p><span class="dot"></span>{status_text}</p>
+    <p>{guilds} serveur(s)</p>
+  </div>
 </body>
 </html>"""
 
 
-class StatusHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path.startswith("/health"):
-            body, ctype = b"ok", "text/plain; charset=utf-8"
-        else:
-            body, ctype = build_status_page().encode("utf-8"), "text/html; charset=utf-8"
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):
-        pass  # silence les logs HTTP
+@app.route("/health")
+def health():
+    return "ok", 200
 
 
-def start_web_server():
-    port = int(os.getenv("PORT", "10000"))  # Render fournit PORT automatiquement
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", port), StatusHandler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"Site de statut en ligne sur le port {port}")
+def run_web():
+    app.run(host="0.0.0.0", port=PORT)
 
 
-# ---------------------------------------------------------------- LANCEMENT
-
-async def main():
-    print("Démarrage de gestion_bot.py...", flush=True)
-    if not TOKEN:
-        raise SystemExit("ERREUR : DISCORD_TOKEN est vide. Ajoute la variable dans Render > Environment.")
-    async with bot:
-        for cog in (Configuration(), Salons(), Moderation(), Utility(), Protection(), Statistiques(), Outils(),
-                    Gestion(), ModerationAvancee(), Recherche(), Suggestions(), Antiraid(), Statut()):
-            await bot.add_cog(cog)
-        start_web_server()
-        try:
-            await bot.start(TOKEN)
-        except discord.PrivilegedIntentsRequired:
-            raise SystemExit("ERREUR : active 'Server Members Intent' et 'Message Content Intent' dans le portail "
-                             "développeur Discord (Bot > Privileged Gateway Intents).")
-        except discord.LoginFailure:
-            raise SystemExit("ERREUR : token Discord invalide. Vérifie DISCORD_TOKEN dans Render.")
-
-
+# ============================================================
+# MAIN
+# ============================================================
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    if not TOKEN:
+        raise SystemExit("❌ Variable d'environnement DISCORD_TOKEN manquante.")
+    threading.Thread(target=run_web, daemon=True).start()
+    bot.run(TOKEN)
