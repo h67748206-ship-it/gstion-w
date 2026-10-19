@@ -42,11 +42,15 @@ intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='+', intents=intents)
 bot.remove_command('help')
 
-# Paramètres globaux
+# Stockage de la configuration
 config = {
     "antilink": False,
     "antispam": False,
-    "antihack": False
+    "antihack": False,
+    "welcome_channel": None,
+    "auto_role": None,
+    "soutien_text": None,
+    "soutien_role": None
 }
 
 @bot.event
@@ -55,8 +59,67 @@ async def on_ready():
     print('Le bot gstion est prêt et opérationnel !')
 
 # ==========================================
-#          ÉCOUTEUR D'ÉVÉNEMENTS (ANTI-LINK)
+#          ÉCOUTEURS D'ÉVÉNEMENTS
 # ==========================================
+@bot.event
+async def on_member_join(member):
+    # 1. Message d'accueil
+    if config["welcome_channel"]:
+        channel = member.guild.get_channel(config["welcome_channel"])
+        if channel:
+            embed = discord.Embed(
+                title=f"{EMOJI_STAR} Bienvenue !",
+                description=f"Bienvenue {member.mention} sur **{member.guild.name}** !",
+                color=discord.Color.green()
+            )
+            embed.set_thumbnail(url=member.display_avatar.url)
+            try:
+                await channel.send(embed=embed)
+            except discord.Forbidden:
+                pass
+
+    # 2. Autorole à l'arrivée
+    if config["auto_role"]:
+        role = member.guild.get_role(config["auto_role"])
+        if role:
+            try:
+                await member.add_roles(role)
+            except discord.Forbidden:
+                pass
+
+@bot.event
+async def on_member_update(before, after):
+    # System de rôle Soutien / Tag / Boost / Statut
+    if config["soutien_role"] and config["soutien_text"]:
+        role = after.guild.get_role(config["soutien_role"])
+        if not role:
+            return
+
+        text = config["soutien_text"].lower()
+        has_tag_or_status = False
+
+        # Vérification du tag dans le pseudo
+        if text in after.display_name.lower() or text in after.name.lower():
+            has_tag_or_status = True
+
+        # Vérification du statut personnalisé
+        for activity in after.activities:
+            if isinstance(activity, discord.CustomActivity) and activity.name:
+                if text in activity.name.lower():
+                    has_tag_or_status = True
+
+            # Vérification du Boost
+            if text == "boost" and after.premium_since is not None:
+                has_tag_or_status = True
+
+        try:
+            if has_tag_or_status and role not in after.roles:
+                await after.add_roles(role)
+            elif not has_tag_or_status and role in after.roles:
+                await after.remove_roles(role)
+        except discord.Forbidden:
+            pass
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -78,6 +141,31 @@ async def on_message(message):
                     pass
 
     await bot.process_commands(message)
+
+# ==========================================
+#          COMMANDES CONFIGURATION
+# ==========================================
+@bot.command(help="Définit le salon d'accueil des nouveaux membres (`+setwelcome #salon`).")
+async def setwelcome(ctx, channel: discord.TextChannel = None):
+    if not channel:
+        return await ctx.send("Usage : `+setwelcome #salon`")
+    config["welcome_channel"] = channel.id
+    await ctx.send(f"{EMOJI_STAR} Salon d'accueil configuré sur {channel.mention}.")
+
+@bot.command(help="Définit le rôle automatique attribué aux nouveaux membres (`+setautorole @rôle`).")
+async def setautorole(ctx, role: discord.Role = None):
+    if not role:
+        return await ctx.send("Usage : `+setautorole @rôle`")
+    config["auto_role"] = role.id
+    await ctx.send(f"{EMOJI_STAR} Auto-role configuré sur **{role.name}**.")
+
+@bot.command(help="Définit le tag/statut requis et le rôle de soutien (`+setsoutien <texte/tag/boost> @rôle`).")
+async def setsoutien(ctx, text=None, role: discord.Role = None):
+    if not text or not role:
+        return await ctx.send("Usage : `+setsoutien <texte_ou_tag_ou_boost> @rôle`\nExemple : `+setsoutien .gstion @Soutien`")
+    config["soutien_text"] = text
+    config["soutien_role"] = role.id
+    await ctx.send(f"{EMOJI_CROWN} Système de soutien configuré ! Le rôle **{role.name}** sera attribué pour le texte/tag/boost `{text}`.")
 
 # ==========================================
 #          COMMANDES PUBLIQUES
@@ -156,17 +244,19 @@ async def wiki(ctx, *, query=None):
     if not query:
         return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier un sujet à chercher (ex: `+wiki France`).")
     try:
-        summary = wikipedia.summary(query, sentences=3)
-        page = wikipedia.page(query)
+        search_results = wikipedia.search(query)
+        if not search_results:
+            return await ctx.send(f"{EMOJI_XCX} Aucun article trouvé sur Wikipédia pour cette recherche.")
+        
+        target_title = search_results[0]
+        summary = wikipedia.summary(target_title, sentences=3, auto_suggest=False)
+        page = wikipedia.page(target_title, auto_suggest=False)
+        
         embed = discord.Embed(title=f"📚 Wikipédia : {page.title}", description=summary, color=discord.Color.green())
         embed.add_field(name="Lien complet", value=f"[Lire l'article]({page.url})")
         await ctx.send(embed=embed)
-    except wikipedia.exceptions.DisambiguationError as e:
-        await ctx.send(f"{EMOJI_XCX} Recherche trop vague. Essayez parmi : {', '.join(e.options[:5])}")
-    except wikipedia.exceptions.PageError:
-        await ctx.send(f"{EMOJI_XCX} Aucun article trouvé sur Wikipédia pour cette recherche.")
-    except Exception:
-        await ctx.send(f"{EMOJI_XCX} Une erreur est survenue lors de la recherche Wikipédia.")
+    except Exception as e:
+        await ctx.send(f"{EMOJI_XCX} Impossible de récupérer les données sur Wikipédia pour ce sujet.")
 
 @bot.command(name="search", help="Recherche une page Wikipédia (`+search wiki <sujet>`).")
 async def search_(ctx, engine=None, *, query=None):
@@ -196,7 +286,7 @@ async def ping(ctx):
 async def speed(ctx):
     await ctx.send(f"⚡ Vitesse du serveur : `{round(bot.latency * 1000)}ms` {EMOJI_NITRO}")
 
-@bot.command(help="Fait répéter un message au bot (ex: `+message Bonjour`).")
+@bot.command(help="Fait répéter un message au bot.")
 async def message(ctx, *, text=None):
     if not text:
         return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier le message à répéter.")
@@ -206,7 +296,7 @@ async def message(ctx, *, text=None):
         pass
     await ctx.send(text)
 
-@bot.command(help="Fait parler le bot à votre place (ex: `+say Bonjour`).")
+@bot.command(help="Fait parler le bot à votre place.")
 async def say(ctx, *, text=None):
     if not text:
         return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier le texte à dire.")
@@ -472,7 +562,7 @@ async def unhideall(ctx):
 async def settings(ctx):
     status_antilink = "Activé" if config["antilink"] else "Désactivé"
     status_antispam = "Activé" if config["antispam"] else "Désactivé"
-    await ctx.send(f"⚙️ **Configuration Actuelle :**\n- Anti-link : `{status_antilink}`\n- Anti-spam : `{status_antispam}`")
+    await ctx.send(f"⚙️ **Configuration Actuelle :**\n- Anti-link : `{status_antilink}`\n- Anti-spam : `{status_antispam}`\n- Salon d'accueil : <#{config['welcome_channel']}>\n- Auto Role : <@&{config['auto_role']}>\n- Tag/Statut Soutien : `{config['soutien_text']}`")
 
 @bot.command(help="Active ou désactive la sécurité Anti-spam (`+antispam on/off`).")
 async def antispam(ctx, status=None):
@@ -536,35 +626,35 @@ async def serverinfo(ctx):
 class HelpSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="Commandes Publiques", description="Voir les commandes publiques", emoji="🌐"),
-            discord.SelectOption(label="Perm 1 à 3", description="Voir les commandes de modération 1-3", emoji="🛡️"),
-            discord.SelectOption(label="Perm 4 à 6", description="Voir les commandes de modération 4-6", emoji="⚖️"),
-            discord.SelectOption(label="Perm 7 à 9", description="Voir les commandes de modération lourde 7-9", emoji="🔨"),
-            discord.SelectOption(label="Owners", description="Voir les commandes d'administration globale", emoji="⚙️")
+            discord.SelectOption(label="Commandes Publiques", description="Liste et description des commandes publiques", emoji="🌐"),
+            discord.SelectOption(label="Perm 1 à 3", description="Liste et description des commandes Perm 1-3", emoji="🛡️"),
+            discord.SelectOption(label="Perm 4 à 6", description="Liste et description des commandes Perm 4-6", emoji="⚖️"),
+            discord.SelectOption(label="Perm 7 à 9", description="Liste et description des commandes Perm 7-9", emoji="🔨"),
+            discord.SelectOption(label="Owners & Config", description="Liste et description des commandes de configuration & Owners", emoji="⚙️")
         ]
-        super().__init__(placeholder="📂 Sélectionnez une catégorie...", min_values=1, max_values=1, options=options)
+        super().__init__(placeholder="📂 Choisissez une catégorie...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         if self.values[0] == "Commandes Publiques":
             embed = discord.Embed(
                 title="🌐 Commandes Publiques",
                 description=(
-                    "`+crowbots` - Liste des bots publics\n"
-                    "`+mybots` - Vos bots enregistrés\n"
-                    "`+pic` - Photo de profil d'un membre\n"
-                    "`+banner` - Bannière d'un membre\n"
-                    "`+server pic/banner` - Icône ou bannière du serveur\n"
-                    "`+emoji` - Image grand format d'un emoji\n"
-                    "`+image` - Traitement d'image\n"
-                    "`+suggestion` - Soumettre une suggestion\n"
-                    "`+lb suggestions` - Classement des suggestions\n"
-                    "`+wiki` - Recherche Wikipédia rapide\n"
-                    "`+search wiki` - Recherche Wikipédia complète\n"
-                    "`+calc` - Calculatrice mathématique\n"
-                    "`+ping` - Latence du bot en ms\n"
-                    "`+speed` - Vitesse de réponse du serveur\n"
-                    "`+message` - Répéter un message\n"
-                    "`+say` - Faire parler le bot"
+                    "`+crowbots` - Affiche la liste des bots publics du système.\n"
+                    "`+mybots` - Affiche la liste de vos bots enregistrés.\n"
+                    "`+pic` - Affiche la photo de profil d'un membre ou la vôtre.\n"
+                    "`+banner` - Affiche la bannière d'un membre s'il en possède une.\n"
+                    "`+server pic/banner` - Affiche l'icône ou la bannière du serveur.\n"
+                    "`+emoji` - Affiche l'image d'un emoji personnalisé en grand.\n"
+                    "`+image` - Traite ou envoie une image.\n"
+                    "`+suggestion` - Soumet une suggestion dans le salon dédié.\n"
+                    "`+lb suggestions` - Affiche le classement des suggestions.\n"
+                    "`+wiki` - Recherche un sujet Wikipédia et affiche un résumé.\n"
+                    "`+search wiki` - Effectue une recherche complète sur Wikipédia.\n"
+                    "`+calc` - Effectue un calcul mathématique basique.\n"
+                    "`+ping` - Affiche la latence du bot en millisecondes.\n"
+                    "`+speed` - Affiche la vitesse du serveur d'hébergement.\n"
+                    "`+message` - Fait répéter un message au bot.\n"
+                    "`+say` - Fait parler le bot à votre place."
                 ),
                 color=discord.Color.blue()
             )
@@ -572,9 +662,19 @@ class HelpSelect(discord.ui.Select):
             embed = discord.Embed(
                 title="🛡️ Commandes Perm 1 à 3",
                 description=(
-                    "**Perm 1:**\n`+sanctions`, `+note`, `+delnote`, `+mute`, `+tempmute`, `+perms`, `+snipe`\n\n"
-                    "**Perm 2:**\n`+voicekick`\n\n"
-                    "**Perm 3:**\n`+warn`, `+antihack`"
+                    "**Perm 1:**\n"
+                    "`+sanctions` - Historique des sanctions d'un membre.\n"
+                    "`+note` - Ajouter une note de modération privée.\n"
+                    "`+delnote` - Supprimer une note via son ID.\n"
+                    "`+mute` - Rendre un membre muet.\n"
+                    "`+tempmute` - Rendre un membre muet temporairement.\n"
+                    "`+perms` - Afficher le niveau de permission d'un membre.\n"
+                    "`+snipe` - Récupérer le dernier message supprimé.\n\n"
+                    "**Perm 2:**\n"
+                    "`+voicekick` - Expulser un membre d'un salon vocal.\n\n"
+                    "**Perm 3:**\n"
+                    "`+warn` - Envoyer un avertissement formel.\n"
+                    "`+antihack` - Activer/Désactiver le système anti-hack."
                 ),
                 color=discord.Color.green()
             )
@@ -582,9 +682,15 @@ class HelpSelect(discord.ui.Select):
             embed = discord.Embed(
                 title="⚖️ Commandes Perm 4 à 6",
                 description=(
-                    "**Perm 4:**\n`+nick`\n\n"
-                    "**Perm 5:**\n`+del`, `+clear`, `+unmute`\n\n"
-                    "**Perm 6:**\n`+addrole`, `+delrole`"
+                    "**Perm 4:**\n"
+                    "`+nick` - Modifier le surnom d'un membre.\n\n"
+                    "**Perm 5:**\n"
+                    "`+del` - Supprimer une sanction enregistrée via son ID.\n"
+                    "`+clear` - Purger un nombre de messages dans le salon.\n"
+                    "`+unmute` - Restaurer la parole d'un membre muet.\n\n"
+                    "**Perm 6:**\n"
+                    "`+addrole` - Ajouter un rôle à un membre.\n"
+                    "`+delrole` - Retirer un rôle à un membre."
                 ),
                 color=discord.Color.orange()
             )
@@ -592,17 +698,50 @@ class HelpSelect(discord.ui.Select):
             embed = discord.Embed(
                 title="🔨 Commandes Perm 7 à 9",
                 description=(
-                    "**Perm 7:**\n`+clearsanctions`, `+kick`, `+banlist`\n\n"
-                    "**Perm 8:**\n`+ban`, `+tempban`, `+unban`, `+derank`, `+lockname`, `+unlockname`, `+locknamelist`, `+blrank`\n\n"
-                    "**Perm 9:**\n`+bl`, `+unbl`, `+blinfo`"
+                    "**Perm 7:**\n"
+                    "`+clearsanctions` - Effacer toutes les sanctions d'un membre.\n"
+                    "`+kick` - Expulser un membre du serveur.\n"
+                    "`+banlist` - Afficher la liste des membres bannis.\n\n"
+                    "**Perm 8:**\n"
+                    "`+ban` - Bannir un membre du serveur.\n"
+                    "`+tempban` - Bannir un membre temporairement.\n"
+                    "`+unban` - Débannir un membre via son ID.\n"
+                    "`+derank` - Retirer les rôles de modération d'un membre.\n"
+                    "`+lockname` - Verrouiller le pseudo d'un membre.\n"
+                    "`+unlockname` - Déverrouiller le pseudo d'un membre.\n"
+                    "`+locknamelist` - Afficher la liste des pseudos verrouillés.\n"
+                    "`+blrank` - Afficher le niveau de rang de blacklist.\n\n"
+                    "**Perm 9:**\n"
+                    "`+bl` - Ajouter un membre à la Blacklist du bot.\n"
+                    "`+unbl` - Retirer un membre de la Blacklist.\n"
+                    "`+blinfo` - Afficher les infos de blacklist."
                 ),
                 color=discord.Color.red()
             )
-        elif self.values[0] == "Owners":
+        elif self.values[0] == "Owners & Config":
             embed = discord.Embed(
-                title="⚙️ Commandes Owners",
+                title="⚙️ Commandes Owners & Configuration",
                 description=(
-                    "`+cmute`, `+tempcmute`, `+uncmute`, `+mutelist`, `+unmuteall`, `+lock`, `+unlock`, `+lockall`, `+unlockall`, `+hide`, `+unhide`, `+hideall`, `+unhideall`, `+settings`, `+antispam`, `+antilink`, `+badwords`, `+allbots`, `+alladmins`, `+boosters`, `+serverinfo`"
+                    "**Configuration :**\n"
+                    "`+setwelcome` - Définir le salon d'arrivée des membres.\n"
+                    "`+setautorole` - Définir le rôle attribué à l'arrivée.\n"
+                    "`+setsoutien` - Configurer le rôle pour Tag/Statut/Boost.\n\n"
+                    "**Gestion des Salons :**\n"
+                    "`+cmute` / `+uncmute` - Muter / Démuter le salon courant.\n"
+                    "`+tempcmute` - Muter le salon temporairement.\n"
+                    "`+lock` / `+unlock` - Verrouiller / Déverrouiller le salon.\n"
+                    "`+lockall` / `+unlockall` - Verrouiller / Déverrouiller tous les salons.\n"
+                    "`+hide` / `+unhide` - Masquer / Afficher le salon.\n"
+                    "`+hideall` / `+unhideall` - Masquer / Afficher tous les salons.\n\n"
+                    "**Administration :**\n"
+                    "`+settings` - Afficher les paramètres actuels du bot.\n"
+                    "`+antispam` - Configurer la sécurité Anti-spam (`on/off`).\n"
+                    "`+antilink` - Configurer la sécurité Anti-link (`on/off`).\n"
+                    "`+badwords` - Gérer les mots interdits.\n"
+                    "`+allbots` - Liste complète des bots du serveur.\n"
+                    "`+alladmins` - Liste de tous les administrateurs.\n"
+                    "`+boosters` - Liste des boosters du serveur.\n"
+                    "`+serverinfo` - Informations détaillées sur le serveur."
                 ),
                 color=discord.Color.gold()
             )
@@ -629,10 +768,10 @@ async def help(ctx, *, command_name=None):
     else:
         embed = discord.Embed(
             title=f"{EMOJI_CROWN} Menu d'aide interactif - Gstion {EMOJI_NITRO}",
-            description="Utilisez le menu déroulant ci-dessous pour choisir une catégorie de commandes.",
+            description="Sélectionnez une catégorie dans le menu déroulant ci-dessous pour afficher les commandes avec leur description complète.",
             color=discord.Color.blue()
         )
-        embed.set_footer(text="Bot gstion • Menu dynamique.")
+        embed.set_footer(text="Bot gstion • Utilisez le menu déroulant pour changer de catégorie.")
         await ctx.send(embed=embed, view=HelpView())
 
 # ==========================================
