@@ -175,7 +175,7 @@ class Salons(commands.Cog):
 
 # ---------------------------------------------------------------- MODÉRATION
 
-class Moderation(commands.Cog):
+class Moderation(commands.Cog, name="Modération"):
     """🛡️ Modération"""
 
     @commands.command()
@@ -284,7 +284,7 @@ class Moderation(commands.Cog):
 
 # ---------------------------------------------------------------- UTILITAIRES
 
-class Utility(commands.Cog):
+class Utility(commands.Cog, name="Utilitaires"):
     """🧰 Utilitaires"""
 
     @commands.command()
@@ -1274,22 +1274,19 @@ async def send_category(ctx, title, cmds, color=discord.Color.blurple()):
 async def help_cmd(ctx, *, sujet: str = None):
     """Affiche la liste des commandes. +help <catégorie> ou +help <commande>."""
     if sujet is None:
-        embed = discord.Embed(
+        intro = discord.Embed(
             title="📖 Aide",
-            description=INTRO + f"\n\nTape `{PREFIX}help <catégorie>` pour le détail d'une catégorie.",
+            description=INTRO + f"\n\nTape `{PREFIX}help <catégorie>` pour une catégorie, "
+                                f"ou `{PREFIX}help <commande>` pour une commande.",
             color=discord.Color.blurple(),
         )
+        intro.set_footer(text=help_footer())
+        await ctx.send(embed=intro)
         for name, cog in bot.cogs.items():
             cmds = [c for c in cog.get_commands() if not c.hidden]
             if cmds:
-                value = " · ".join(f"`{PREFIX}{c.name}`" for c in cmds)
-                embed.add_field(
-                    name=f"{CATEGORY_EMOJIS.get(name, '📁')} {name} ({len(cmds)})",
-                    value=value[:1000],
-                    inline=False,
-                )
-        embed.set_footer(text=help_footer())
-        return await ctx.send(embed=embed)
+                await send_category(ctx, f"{CATEGORY_EMOJIS.get(name, '📁')} {name} ({len(cmds)})", cmds)
+        return
 
     for name, cog in bot.cogs.items():
         if name.lower() == sujet.lower() or name.lower().endswith(sujet.lower()):
