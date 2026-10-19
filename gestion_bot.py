@@ -60,6 +60,7 @@ CATEGORY_EMOJIS = {
     "Recherche & infos": "🌐",
     "Suggestions": "💡",
     "Antiraid & antihack": "🛡️",
+    "Statut du bot": "🤖",
 }
 
 
@@ -1311,6 +1312,62 @@ async def help_cmd(ctx, *, sujet: str = None):
     await ctx.send(f"❌ Aucune catégorie ni commande « {sujet} ». Tape `{PREFIX}help`.")
 
 
+# ---------------------------------------------------------------- STATUT DU BOT
+
+STATUS_KINDS = {
+    "jouer": discord.ActivityType.playing,
+    "regarder": discord.ActivityType.watching,
+    "ecouter": discord.ActivityType.listening,
+    "écouter": discord.ActivityType.listening,
+    "competition": discord.ActivityType.competing,
+    "compétition": discord.ActivityType.competing,
+}
+
+
+def build_activity(kind, text):
+    if kind == "perso":
+        return discord.CustomActivity(name=text)
+    return discord.Activity(type=STATUS_KINDS[kind], name=text)
+
+
+class Statut(commands.Cog, name="Statut du bot"):
+    """🤖 Statut du bot"""
+
+    @commands.command()
+    @commands.has_permissions(administrator=True)
+    async def status(self, ctx, kind: str = None, *, texte: str = None):
+        """Change le statut du bot : jouer, regarder, écouter, competition, perso, reset."""
+        if kind is None:
+            saved = config.get("bot_status")
+            if not saved:
+                return await ctx.send("🤖 Aucun statut personnalisé défini.")
+            return await ctx.send(f"🤖 Statut actuel : **{saved['type']}** {saved['text']}")
+
+        kind = kind.lower()
+        if kind == "reset":
+            config.pop("bot_status", None)
+            save_json(CONFIG_FILE, config)
+            await bot.change_presence(activity=None)
+            return await ctx.send("🤖 Statut réinitialisé.")
+
+        valid = set(STATUS_KINDS) | {"perso"}
+        if kind not in valid or not texte:
+            return await ctx.send(
+                f"❌ Usage : `{PREFIX}status <jouer|regarder|écouter|competition|perso|reset> <texte>`")
+
+        text = texte[:128]
+        config["bot_status"] = {"type": kind, "text": text}
+        save_json(CONFIG_FILE, config)
+        await bot.change_presence(activity=build_activity(kind, text))
+        await ctx.send(f"🤖 Statut mis à jour : **{kind}** {text}")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        saved = config.get("bot_status")
+        if saved and saved.get("type") in set(STATUS_KINDS) | {"perso"}:
+            await bot.change_presence(activity=build_activity(saved["type"], saved["text"]))
+
+
 # ---------------------------------------------------------------- EVENTS
 
 @bot.event
@@ -1427,7 +1484,7 @@ def start_web_server():
 
 async def main():
     async with bot:
-        for cog in (Configuration(), Salons(), Moderation(), Utility(), Protection(), Statistiques(), Outils(), Gestion(), ModerationAvancee(), Recherche(), Suggestions(), Antiraid()):
+        for cog in (Configuration(), Salons(), Moderation(), Utility(), Protection(), Statistiques(), Outils(), Gestion(), ModerationAvancee(), Recherche(), Suggestions(), Antiraid(), Statut()):
             await bot.add_cog(cog)
         start_web_server()
         await bot.start(TOKEN)
