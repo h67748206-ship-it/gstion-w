@@ -1,813 +1,649 @@
+import asyncio
+import json
 import os
-import re
-import threading
-import wikipedia
-from flask import Flask
+from pathlib import Path
+from threading import Thread
+
 import discord
 from discord.ext import commands
+from flask import Flask, jsonify
 
-# Configuration de la langue pour Wikipédia
-wikipedia.set_lang("fr")
+# ---------- Emojis personnalisés ----------
+EMOJI_VERROUILLER = "<:5_flowerblue:1561514309480353964>"
+EMOJI_DEVERROUILLER = "<a:znkshp:1554788348130754581>"
+EMOJI_CACHER = "<:b_Wumpus_Heart:1552978356545265789>"
+EMOJI_AFFICHER = "<a:01_9musik:1553010062761533651>"
+EMOJI_RENOMMER = "✏️"
 
-# ==========================================
-#            EMOJIS PERSONNALISÉS
-# ==========================================
-EMOJI_NITRO = "<a:M_SYnitro:1561699280174055434>"
-EMOJI_STAR  = "<:1550556335995883560:1561699282082471948>"
-EMOJI_XCX   = "<:xcx:1561699277842157624>"
-EMOJI_SHIELD= "<:1462041546160472095:1561379419178672158>"
-EMOJI_CROWN = "<:Crown:1561379407195545641>"
-EMOJI_LOCK  = "<:lock:1561379416414879777>"
+# ---------- Site web (Render) ----------
+app = Flask(__name__)
+etat = {"nom": "VoiceMaster", "statut": "démarrage..."}
 
-# ==========================================
-#            CONFIGURATION FLASK
-# ==========================================
-app = Flask('')
+COMMANDES = [
+    ("Tout le monde", [
+        ("=panneau", "Afficher le panneau de gestion dans ce salon texte."),
+        ("=help", "Afficher cette aide."),
+    ]),
+    ("Whitelist", [
+        ("=setup <id>", "Définir le salon générateur."),
+        ("=find @m", "Trouver quelqu'un en vocal."),
+        ("=bringall", "Ramener tout le monde dans ton vocal."),
+        ("=bringcc <cat> <cat>", "Répartir les vocaux d'une catégorie dans une autre."),
+        ("=wakeup @m", "Faire visiter tous les vocaux à un membre puis le ramener."),
+    ]),
+    ("Outils vocaux", [
+        ("=mv @m", "Ramener un membre dans TON vocal."),
+        ("=join @m", "Te déplacer dans SON vocal."),
+        ("=follow @m", "La personne te suit de salon en salon."),
+        ("=unfollow @m", "Elle arrête de te suivre."),
+    ]),
+    ("Owner", [
+        ("=perm", "Panneau des perms (rôles → commandes)."),
+        ("=wl @m", "Gérer la whitelist."),
+        ("=owner @m", "Ajouter ou retirer un owner."),
+        ("=unowner @m", "Retirer un owner (ou =unowner all pour tous)."),
+        ("=antimute @m", "Protéger un membre contre le mute et le sourdine serveur."),
+        ("=perso", "Personnaliser le bot (avatar, nom, statut)."),
+        ("=prefix <nouveau>", "Changer le préfixe du bot."),
+    ]),
+]
 
-@app.route('/')
-def home():
-    return "Le bot gstion est en ligne et actif !"
 
-def run_flask():
-    app.run(host='0.0.0.0', port=10000)
+def construire_commandes() -> str:
+    blocs = []
+    for titre, lignes in COMMANDES:
+        items = "".join(
+            f"<div class='cmd'><code>{cmd}</code><small>{desc}</small></div>"
+            for cmd, desc in lignes
+        )
+        blocs.append(f"<section class='card'><h2>{titre.upper()}</h2>{items}</section>")
+    return "".join(blocs)
+
+
+PAGE = """<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceMaster</title>
+<style>
+  body { margin:0; font-family: system-ui, sans-serif; background:#0b1220; color:#e6f7ff; }
+  header { padding:56px 24px 32px; text-align:center; }
+  h1 { color:#33c6ff; margin:0 0 8px; font-size:44px; letter-spacing:.02em; }
+  .sub { color:#8aa0b5; margin:0 0 18px; }
+  .badge { display:inline-block; padding:6px 14px; border-radius:999px; background:#12263a; color:#7fe0ff; font-size:14px; }
+  main { max-width:960px; margin:0 auto; padding:0 20px 48px;
+         display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:16px; }
+  .card { background:#12263a; border-radius:12px; padding:18px; }
+  .card h2 { font-size:13px; color:#33c6ff; margin:0 0 12px; letter-spacing:.1em; }
+  .cmd { margin-bottom:12px; }
+  code { display:inline-block; background:#0b1220; padding:6px 10px; border-radius:8px; color:#fff; font-weight:600; }
+  .cmd small { display:block; color:#8aa0b5; margin-top:4px; font-size:13px; }
+  footer { text-align:center; color:#8aa0b5; padding:24px; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>VoiceMaster</h1>
+  <p class="sub">Salons vocaux temporaires · panneau de gestion</p>
+  <span class="badge">__STATUT__ · préfixe =</span>
+</header>
+<main>__COMMANDES__</main>
+<footer>Rejoins le générateur pour créer ton vocal · =panneau pour le gérer</footer>
+</body>
+</html>"""
+
+
+@app.route("/")
+def accueil():
+    return PAGE.replace("__STATUT__", etat["statut"]).replace("__COMMANDES__", construire_commandes())
+
+
+@app.route("/health")
+def health():
+    return jsonify(status="ok", bot=etat["nom"], statut=etat["statut"])
+
 
 def keep_alive():
-    t = threading.Thread(target=run_flask)
-    t.start()
+    port = int(os.environ.get("PORT", 10000))
+    Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port),
+        daemon=True,
+    ).start()
 
-# ==========================================
-#          CONFIGURATION DU BOT
-# ==========================================
-intents = discord.Intents.all()
-bot = commands.Bot(command_prefix='+', intents=intents)
-bot.remove_command('help')
 
-# Stockage de la configuration
-config = {
-    "antilink": False,
-    "antispam": False,
-    "antihack": False,
-    "welcome_channel": None,
-    "auto_role": None,
-    "soutien_text": None,
-    "soutien_role": None
+def set_status(texte: str):
+    etat["statut"] = texte
+
+
+# ---------- Configuration du bot ----------
+TOKEN = os.environ["DISCORD_TOKEN"]
+BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "0"))
+DATA_FILE = Path("data.json")
+DELAI = 0.5
+DELAI_WAKEUP = 1.0
+
+NIVEAUX_PAR_DEFAUT = {
+    "panneau": "all",
+    "setup": "wl",
+    "find": "wl",
+    "bringall": "wl",
+    "bringcc": "wl",
+    "mv": "wl",
+    "join": "wl",
+    "follow": "wl",
+    "unfollow": "wl",
+    "wakeup": "wl",
 }
+
+suivis: dict[int, int] = {}
+wakeup_en_cours: set[int] = set()
+
+
+def charger() -> dict:
+    if DATA_FILE.exists():
+        d = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    else:
+        d = {"prefix": "=", "owners": [], "guilds": {}}
+    d.setdefault("antimute", [])
+    return d
+
+
+data = charger()
+
+
+def sauver():
+    DATA_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def guilde(guild_id: int) -> dict:
+    g = data["guilds"].setdefault(str(guild_id), {})
+    g.setdefault("generator", None)
+    g.setdefault("temp", {})
+    g.setdefault("whitelist", [])
+    g.setdefault("perms", {})
+    return g
+
+
+def get_prefix(bot, message):
+    return data["prefix"]
+
+
+def est_owner(membre: discord.Member) -> bool:
+    return (
+        membre.id == BOT_OWNER_ID
+        or membre.id in data["owners"]
+        or membre.guild.owner_id == membre.id
+    )
+
+
+def niveau(guild: discord.Guild, commande: str) -> str:
+    return guilde(guild.id)["perms"].get(commande, NIVEAUX_PAR_DEFAUT.get(commande, "all"))
+
+
+def autorise(ctx: commands.Context, commande: str) -> bool:
+    if est_owner(ctx.author):
+        return True
+    niv = niveau(ctx.guild, commande)
+    if niv == "all":
+        return True
+    if niv == "wl":
+        return ctx.author.id in guilde(ctx.guild.id)["whitelist"]
+    return False
+
+
+def requis(commande: str):
+    async def predicat(ctx):
+        if autorise(ctx, commande):
+            return True
+        raise commands.CheckFailure(f"Tu n'as pas la permission d'utiliser `{ctx.prefix}{commande}`.")
+    return commands.check(predicat)
+
+
+def owner_only():
+    async def predicat(ctx):
+        if est_owner(ctx.author):
+            return True
+        raise commands.CheckFailure("Cette commande est réservée aux owners.")
+    return commands.check(predicat)
+
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members = True
+intents.voice_states = True
+
+bot = commands.Bot(command_prefix=get_prefix, intents=intents, help_command=None)
+
+
+# ---------- Salons temporaires ----------
+async def creer_temp(membre: discord.Member, generateur: discord.VoiceChannel):
+    g = guilde(membre.guild.id)
+    overwrites = {
+        membre: discord.PermissionOverwrite(
+            view_channel=True, connect=True, manage_channels=True, move_members=True
+        )
+    }
+    salon = await membre.guild.create_voice_channel(
+        name=f"{membre.display_name} • vocal",
+        category=generateur.category,
+        overwrites=overwrites,
+        reason="Salon vocal temporaire",
+    )
+    g["temp"][str(salon.id)] = membre.id
+    sauver()
+    try:
+        await membre.move_to(salon)
+    except discord.HTTPException:
+        await nettoyer(salon, force=True)
+
+
+async def nettoyer(salon: discord.VoiceChannel, force: bool = False):
+    g = guilde(salon.guild.id)
+    if str(salon.id) not in g["temp"]:
+        return
+    if force or len(salon.members) == 0:
+        g["temp"].pop(str(salon.id), None)
+        sauver()
+        try:
+            await salon.delete(reason="Salon temporaire vide")
+        except discord.HTTPException:
+            pass
+
+
+async def suivre(leader: discord.Member, salon: discord.VoiceChannel):
+    for suiveur_id, leader_id in list(suivis.items()):
+        if leader_id != leader.id:
+            continue
+        suiveur = leader.guild.get_member(suiveur_id)
+        if suiveur and suiveur.voice and suiveur.voice.channel != salon:
+            try:
+                await suiveur.move_to(salon)
+            except discord.HTTPException:
+                pass
+
+
+async def proteger_contre_mute(membre: discord.Member, avant, apres):
+    """Annule un mute ou un sourdine serveur appliqué sur une personne protégée."""
+    if apres.channel is None:
+        return
+    kwargs = {}
+    if apres.mute and not avant.mute:
+        kwargs["mute"] = False
+    if apres.deaf and not avant.deaf:
+        kwargs["deafen"] = False
+    if kwargs:
+        try:
+            await membre.edit(reason="Anti-mute", **kwargs)
+        except discord.HTTPException:
+            pass
+
 
 @bot.event
 async def on_ready():
-    print(f'Connecté en tant que {bot.user.name} (ID: {bot.user.id})')
-    print('Le bot gstion est prêt et opérationnel !')
+    set_status("en ligne")
+    print(f"Connecté en tant que {bot.user} (préfixe : {data['prefix']})")
 
-# ==========================================
-#          ÉCOUTEURS D'ÉVÉNEMENTS
-# ==========================================
-@bot.event
-async def on_member_join(member):
-    # 1. Message d'accueil
-    if config["welcome_channel"]:
-        channel = member.guild.get_channel(config["welcome_channel"])
-        if channel:
-            embed = discord.Embed(
-                title=f"{EMOJI_STAR} Bienvenue !",
-                description=f"Bienvenue {member.mention} sur **{member.guild.name}** !",
-                color=discord.Color.green()
-            )
-            embed.set_thumbnail(url=member.display_avatar.url)
-            try:
-                await channel.send(embed=embed)
-            except discord.Forbidden:
-                pass
-
-    # 2. Autorole à l'arrivée
-    if config["auto_role"]:
-        role = member.guild.get_role(config["auto_role"])
-        if role:
-            try:
-                await member.add_roles(role)
-            except discord.Forbidden:
-                pass
 
 @bot.event
-async def on_member_update(before, after):
-    # Système de rôle Soutien / Tag / Boost / Statut
-    if config["soutien_role"] and config["soutien_text"]:
-        role = after.guild.get_role(config["soutien_role"])
-        if not role:
-            return
-
-        text = config["soutien_text"].lower()
-        has_tag_or_status = False
-
-        # Vérification du tag dans le pseudo
-        if text in after.display_name.lower() or text in after.name.lower():
-            has_tag_or_status = True
-
-        # Vérification du statut personnalisé
-        for activity in after.activities:
-            if isinstance(activity, discord.CustomActivity) and activity.name:
-                if text in activity.name.lower():
-                    has_tag_or_status = True
-
-            # Vérification du Boost
-            if text == "boost" and after.premium_since is not None:
-                has_tag_or_status = True
-
-        try:
-            if has_tag_or_status and role not in after.roles:
-                await after.add_roles(role)
-            elif not has_tag_or_status and role in after.roles:
-                await after.remove_roles(role)
-        except discord.Forbidden:
-            pass
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
+async def on_voice_state_update(membre, avant, apres):
+    if membre.bot:
         return
-
-    # Détection des liens si l'anti-link est activé
-    if config["antilink"]:
-        link_regex = r"(https?://[^\s]+|discord\.gg/[^\s]+|discord\.com/invite/[^\s]+)"
-        if re.search(link_regex, message.content, re.IGNORECASE):
-            if not message.author.guild_permissions.administrator:
-                try:
-                    await message.delete()
-                    await message.channel.send(
-                        f"{EMOJI_XCX} {message.author.mention}, les liens ne sont pas autorisés sur ce serveur !",
-                        delete_after=5
-                    )
-                    return
-                except discord.Forbidden:
-                    pass
-
-    await bot.process_commands(message)
-
-# ==========================================
-#          COMMANDES CONFIGURATION
-# ==========================================
-@bot.command(help="Définit le salon d'accueil des nouveaux membres (`+setwelcome #salon`).")
-async def setwelcome(ctx, channel: discord.TextChannel = None):
-    if not channel:
-        return await ctx.send("Usage : `+setwelcome #salon`")
-    config["welcome_channel"] = channel.id
-    await ctx.send(f"{EMOJI_STAR} Salon d'accueil configuré sur {channel.mention}.")
-
-@bot.command(help="Définit le rôle automatique attribué aux nouveaux membres (`+setautorole @rôle`).")
-async def setautorole(ctx, role: discord.Role = None):
-    if not role:
-        return await ctx.send("Usage : `+setautorole @rôle`")
-    config["auto_role"] = role.id
-    await ctx.send(f"{EMOJI_STAR} Auto-role configuré sur **{role.name}**.")
-
-@bot.command(help="Définit le tag/statut requis et le rôle de soutien (`+setsoutien <texte/tag/boost> @rôle`).")
-async def setsoutien(ctx, text=None, role: discord.Role = None):
-    if not text or not role:
-        return await ctx.send("Usage : `+setsoutien <texte_ou_tag_ou_boost> @rôle`\nExemple : `+setsoutien .gstion @Soutien`")
-    config["soutien_text"] = text
-    config["soutien_role"] = role.id
-    await ctx.send(f"{EMOJI_CROWN} Système de soutien configuré ! Le rôle **{role.name}** sera attribué pour le texte/tag/boost `{text}`.")
-
-# ==========================================
-#          COMMANDES PUBLIQUES
-# ==========================================
-@bot.command(help="Affiche la liste des bots publics enregistrés sur le serveur.")
-async def crowbots(ctx):
-    await ctx.send(f"{EMOJI_STAR} **Bots Publics :** Aucun bot public enregistré pour le moment.")
-
-@bot.command(help="Affiche la liste des bots que vous avez enregistrés.")
-async def mybots(ctx):
-    await ctx.send(f"{EMOJI_STAR} **Vos Bots :** Vous n'avez enregistré aucun bot.")
-
-@bot.command(help="Affiche la photo de profil d'un membre ou la vôtre.")
-async def pic(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    embed = discord.Embed(title=f"Photo de profil de {member.display_name}", color=discord.Color.blue())
-    embed.set_image(url=member.display_avatar.url)
-    await ctx.send(embed=embed)
-
-@bot.command(help="Affiche la bannière d'un membre s'il en possède une.")
-async def banner(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    user = await bot.fetch_user(member.id)
-    if user.banner:
-        embed = discord.Embed(title=f"Bannière de {user.display_name}", color=discord.Color.blue())
-        embed.set_image(url=user.banner.url)
-        await ctx.send(embed=embed)
-    else:
-        await ctx.send(f"{EMOJI_XCX} Cet utilisateur n'a pas de bannière.")
-
-@bot.command(name="server", help="Affiche l'icône (`+server pic`) ou la bannière (`+server banner`) du serveur.")
-async def server_(ctx, action: str = None):
-    if action == "pic":
-        if ctx.guild.icon:
-            embed = discord.Embed(title=f"Icône de {ctx.guild.name}", color=discord.Color.blue())
-            embed.set_image(url=ctx.guild.icon.url)
-            await ctx.send(embed=embed)
-        else:
-            await ctx.send(f"{EMOJI_XCX} Ce serveur n'a pas d'icône.")
-    elif action == "banner":
-        if ctx.guild.banner:
-            embed = discord.Embed(title=f"Bannière de {ctx.guild.name}", color=discord.Color.blue())
-            embed.set_image(url=ctx.guild.banner.url)
-            await ctx.send(embed=embed)
-        else:
-            await ctx.send(f"{EMOJI_XCX} Ce serveur n'a pas de bannière.")
-    else:
-        await ctx.send("Usage: `+server pic` ou `+server banner`")
-
-@bot.command(help="Affiche l'image en grand d'un emoji personnalisé du serveur.")
-async def emoji(ctx, emoji: discord.Emoji = None):
-    if emoji:
-        await ctx.send(emoji.url)
-    else:
-        await ctx.send(f"{EMOJI_XCX} Veuillez spécifier un emoji personnalisé valide.")
-
-@bot.command(help="Envoie ou traite une image.")
-async def image(ctx):
-    await ctx.send("🖼️ Fonctionnalité d'image prête.")
-
-@bot.command(help="Soumet une suggestion dans le salon de suggestions.")
-async def suggestion(ctx, *, text=None):
-    if not text:
-        return await ctx.send(f"{EMOJI_XCX} Veuillez écrire le contenu de votre suggestion.")
-    await ctx.send(f"{EMOJI_STAR} **Nouvelle Suggestion par {ctx.author.mention} :**\n{text}")
-
-@bot.command(name="lb", help="Affiche le classement du serveur (`+lb suggestions`).")
-async def lb_(ctx, category=None):
-    if category == "suggestions":
-        await ctx.send(f"{EMOJI_CROWN} **Classement des top suggestions :**\n1. Suggestion A\n2. Suggestion B")
-    else:
-        await ctx.send("Usage: `+lb suggestions`")
-
-@bot.command(help="Recherche un sujet sur Wikipédia et affiche un résumé complet.")
-async def wiki(ctx, *, query=None):
-    if not query:
-        return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier un sujet à chercher (ex: `+wiki France`).")
-
-    try:
-        wikipedia.set_lang("fr")
-        wikipedia.set_user_agent("GstionBot/1.0 (https://discord.gg/)")
-
-        search_results = wikipedia.search(query)
-        if not search_results:
-            return await ctx.send(f"{EMOJI_XCX} Aucun article trouvé sur Wikipédia pour `{query}`.")
-
-        target_title = search_results[0]
-        summary = wikipedia.summary(target_title, sentences=3, auto_suggest=False)
-        page = wikipedia.page(target_title, auto_suggest=False)
-
-        embed = discord.Embed(
-            title=f"📚 Wikipédia : {page.title}",
-            description=summary if len(summary) < 2000 else summary[:1990] + "...",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Lien complet", value=f"[Lire l'article]({page.url})")
-        await ctx.send(embed=embed)
-
-    except wikipedia.exceptions.DisambiguationError as e:
-        options = ", ".join([f"`{opt}`" for opt in e.options[:5]])
-        await ctx.send(f"⚠️ Votre recherche est trop vague. Essayez parmi : {options}")
-
-    except wikipedia.exceptions.PageError:
-        await ctx.send(f"{EMOJI_XCX} La page Wikipédia demandée n'a pas pu être chargée.")
-
-    except Exception:
-        await ctx.send(f"{EMOJI_XCX} Une erreur est survenue lors de la recherche Wikipédia.")
-
-@bot.command(name="search", help="Recherche une page Wikipédia (`+search wiki <sujet>`).")
-async def search_(ctx, engine=None, *, query=None):
-    if engine and engine.lower() == "wiki" and query:
-        await wiki(ctx, query=query)
-    else:
-        await ctx.send("Usage : `+search wiki <votre recherche>`")
-
-@bot.command(help="Calcule une expression mathématique basique (ex: `+calc 5+5`).")
-async def calc(ctx, *, expression=None):
-    if not expression:
-        return await ctx.send(f"{EMOJI_XCX} Veuillez entrer une expression mathématique.")
-    try:
-        allowed = set("0123456789+-*/(). ")
-        if not set(expression).issubset(allowed):
-            return await ctx.send(f"{EMOJI_XCX} Caractères non autorisés.")
-        result = eval(expression)
-        await ctx.send(f"🧮 **Résultat :** `{result}`")
-    except Exception:
-        await ctx.send(f"{EMOJI_XCX} Expression mathématique invalide.")
-
-@bot.command(help="Affiche la latence actuelle du bot en millisecondes.")
-async def ping(ctx):
-    await ctx.send(f"🏓 Pong ! `{round(bot.latency * 1000)}ms` {EMOJI_NITRO}")
-
-@bot.command(help="Affiche la vitesse de réponse de l'hébergement du bot.")
-async def speed(ctx):
-    await ctx.send(f"⚡ Vitesse du serveur : `{round(bot.latency * 1000)}ms` {EMOJI_NITRO}")
-
-@bot.command(help="Fait répéter un message au bot.")
-async def message(ctx, *, text=None):
-    if not text:
-        return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier le message à répéter.")
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
-    await ctx.send(text)
-
-@bot.command(help="Fait parler le bot à votre place.")
-async def say(ctx, *, text=None):
-    if not text:
-        return await ctx.send(f"{EMOJI_XCX} Veuillez spécifier le texte à dire.")
-    try:
-        await ctx.message.delete()
-    except discord.Forbidden:
-        pass
-    await ctx.send(text)
-
-# ==========================================
-#          COMMANDES PERM 1 À PERM 4
-# ==========================================
-@bot.command(help="Affiche l'historique complet des sanctions d'un membre.")
-async def sanctions(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    await ctx.send(f"📜 **Sanctions de {member.mention} :** Aucune sanction enregistrée.")
-
-@bot.command(help="Ajoute une note de modération privée sur un membre.")
-async def note(ctx, member: discord.Member = None, *, text=None):
-    if not member or not text:
-        return await ctx.send("Usage : `+note @membre <votre note>`")
-    await ctx.send(f"📝 Note ajoutée sur **{member.display_name}** : {text}")
-
-@bot.command(name="delnote", help="Supprime une note de modération spécifique par son ID.")
-async def note_delete(ctx, note_id=None):
-    if not note_id:
-        return await ctx.send("Usage : `+delnote <ID_note>`")
-    await ctx.send(f"{EMOJI_STAR} Note `{note_id}` supprimée avec succès.")
-
-@bot.command(help="Rend un membre muet sur l'ensemble du serveur.")
-async def mute(ctx, member: discord.Member = None, *, reason=None):
-    if not member:
-        return await ctx.send("Usage : `+mute @membre [raison]`")
-    await ctx.send(f"{EMOJI_LOCK} **{member.mention}** a été rendu muet. Raison : {reason or 'Aucune'}")
-
-@bot.command(help="Rend un membre muet pour une durée définie (ex: `+tempmute @membre 10m`).")
-async def tempmute(ctx, member: discord.Member = None, time=None, *, reason=None):
-    if not member or not time:
-        return await ctx.send("Usage : `+tempmute @membre <durée> [raison]`")
-    await ctx.send(f"⏱️ **{member.mention}** a été rendu muet pour `{time}`. Raison : {reason or 'Aucune'}")
-
-@bot.command(help="Affiche le niveau de permission d'un membre sur le bot.")
-async def perms(ctx, member: discord.Member = None):
-    member = member or ctx.author
-    await ctx.send(f"{EMOJI_SHIELD} **Permissions de {member.mention} :** Membre / Modérateur")
-
-@bot.command(help="Affiche le dernier message qui a été supprimé dans le salon.")
-async def snipe(ctx):
-    await ctx.send("🎯 Aucun message supprimé récent à récupérer.")
-
-@bot.command(help="Expulse un membre connecté dans un salon vocal.")
-async def voicekick(ctx, member: discord.Member = None):
-    if member and member.voice:
-        await member.move_to(None)
-        await ctx.send(f"🔊 **{member.display_name}** a été expulsé du salon vocal.")
-    else:
-        await ctx.send(f"{EMOJI_XCX} Membre introuvable ou non connecté en vocal.")
-
-@bot.command(help="Envoie un avertissement formel à un membre.")
-async def warn(ctx, member: discord.Member = None, *, reason=None):
-    if not member:
-        return await ctx.send("Usage : `+warn @membre [raison]`")
-    await ctx.send(f"⚠️ **{member.mention}** a reçu un avertissement. Raison : {reason or 'Aucune'}")
-
-@bot.command(help="Active ou désactive la protection Anti-hack (`+antihack on/off`).")
-async def antihack(ctx, status=None):
-    if status in ["on", "off"]:
-        config["antihack"] = (status == "on")
-        await ctx.send(f"{EMOJI_SHIELD} Anti-hack configuré sur : **{status.upper()}**")
-    else:
-        await ctx.send("Usage : `+antihack on` ou `+antihack off`")
-
-@bot.command(help="Modifie le surnom d'un membre sur le serveur.")
-async def nick(ctx, member: discord.Member = None, *, new_nick=None):
-    if member:
-        await member.edit(nick=new_nick)
-        await ctx.send(f"✏️ Surnom de **{member.name}** modifié en : `{new_nick}`")
-    else:
-        await ctx.send("Usage : `+nick @membre <nouveau_surnom>`")
-
-# ==========================================
-#          COMMANDES PERM 5 À PERM 9
-# ==========================================
-@bot.command(aliases=["delsanction"], help="Supprime une sanction enregistrée via son ID.")
-async def del_(ctx, sanction_id=None):
-    if not sanction_id:
-        return await ctx.send("Usage : `+del <ID_sanction>`")
-    await ctx.send(f"🗑️ Sanction `{sanction_id}` supprimée.")
-
-@bot.command(help="Supprime un nombre spécifique de messages dans le salon.")
-async def clear(ctx, amount: int = 10):
-    await ctx.channel.purge(limit=amount + 1)
-    await ctx.send(f"🧹 `{amount}` messages ont été supprimés.", delete_after=5)
-
-@bot.command(help="Restaure la parole d'un membre muté.")
-async def unmute(ctx, member: discord.Member = None):
-    if not member:
-        return await ctx.send("Usage : `+unmute @membre`")
-    await ctx.send(f"🔊 **{member.mention}** a été unmuté.")
-
-@bot.command(help="Ajoute un rôle spécifique à un membre.")
-async def addrole(ctx, member: discord.Member = None, role: discord.Role = None):
-    if member and role:
-        await member.add_roles(role)
-        await ctx.send(f"{EMOJI_STAR} Rôle **{role.name}** ajouté à {member.mention}.")
-    else:
-        await ctx.send("Usage : `+addrole @membre @rôle`")
-
-@bot.command(help="Retire un rôle spécifique à un membre.")
-async def delrole(ctx, member: discord.Member = None, role: discord.Role = None):
-    if member and role:
-        await member.remove_roles(role)
-        await ctx.send(f"🗑️ Rôle **{role.name}** retiré à {member.mention}.")
-    else:
-        await ctx.send("Usage : `+delrole @membre @rôle`")
-
-@bot.command(name="clearsanctions", help="Efface la totalité des sanctions d'un membre.")
-async def clear_sanctions_cmd(ctx, member: discord.Member = None):
-    if not member:
-        return await ctx.send("Usage : `+clearsanctions @membre`")
-    await ctx.send(f"🧹 Toutes les sanctions de **{member.display_name}** ont été effacées.")
-
-@bot.command(help="Expulse définitivement un membre du serveur.")
-async def kick(ctx, member: discord.Member = None, *, reason=None):
-    if member:
-        await member.kick(reason=reason)
-        await ctx.send(f"👞 **{member.display_name}** a été expulsé. Raison : {reason or 'Aucune'}")
-    else:
-        await ctx.send("Usage : `+kick @membre [raison]`")
-
-@bot.command(help="Affiche la liste complète des utilisateurs bannis.")
-async def banlist(ctx):
-    bans = [entry async for entry in ctx.guild.bans()]
-    await ctx.send(f"🔨 Il y a actuellement **{len(bans)}** membres bannis du serveur.")
-
-@bot.command(help="Bannit définitivement un membre du serveur.")
-async def ban(ctx, member: discord.Member = None, *, reason=None):
-    if member:
-        await member.ban(reason=reason)
-        await ctx.send(f"🔨 **{member.display_name}** a été banni. Raison : {reason or 'Aucune'}")
-    else:
-        await ctx.send("Usage : `+ban @membre [raison]`")
-
-@bot.command(help="Bannit temporairement un membre du serveur.")
-async def tempban(ctx, member: discord.Member = None, time=None, *, reason=None):
-    if member and time:
-        await ctx.send(f"⏱️ **{member.display_name}** banni temporairement pour `{time}`.")
-    else:
-        await ctx.send("Usage : `+tempban @membre <durée> [raison]`")
-
-@bot.command(help="Débannit un utilisateur du serveur à l'aide de son ID.")
-async def unban(ctx, user_id: int = None):
-    if user_id:
-        user = await bot.fetch_user(user_id)
-        await ctx.guild.unban(user)
-        await ctx.send(f"{EMOJI_STAR} **{user.name}** a été débanni.")
-    else:
-        await ctx.send("Usage : `+unban <ID_utilisateur>`")
-
-@bot.command(help="Retire tous les rôles de modération/administration d'un membre.")
-async def derank(ctx, member: discord.Member = None):
-    if member:
-        await ctx.send(f"📉 Derank effectué sur **{member.display_name}**.")
-    else:
-        await ctx.send("Usage : `+derank @membre`")
-
-@bot.command(help="Verrouille le pseudo d'un membre pour l'empêcher de le changer.")
-async def lockname(ctx, member: discord.Member = None):
-    await ctx.send(f"{EMOJI_LOCK} Nom verrouillé.")
-
-@bot.command(help="Déverrouille le pseudo d'un membre.")
-async def unlockname(ctx):
-    await ctx.send("🔓 Nom déverrouillé.")
-
-@bot.command(help="Affiche la liste de tous les pseudos verrouillés sur le serveur.")
-async def locknamelist(ctx):
-    await ctx.send("📋 Liste des pseudos verrouillés...")
-
-@bot.command(help="Affiche le niveau de rang dans la blacklist.")
-async def blrank(ctx):
-    await ctx.send(f"{EMOJI_XCX} Rang de blacklist affiché.")
-
-@bot.command(help="Ajoute un membre à la Blacklist globale du bot.")
-async def bl(ctx, member: discord.Member = None):
-    if member:
-        await ctx.send(f"{EMOJI_XCX} **{member.display_name}** a été ajouté à la Blacklist.")
-    else:
-        await ctx.send("Usage : `+bl @membre`")
-
-@bot.command(help="Retire un membre de la Blacklist du bot.")
-async def unbl(ctx, member: discord.Member = None):
-    if member:
-        await ctx.send(f"{EMOJI_STAR} **{member.display_name}** retiré de la Blacklist.")
-    else:
-        await ctx.send("Usage : `+unbl @membre`")
-
-@bot.command(help="Affiche les détails de la raison de blacklist d'un membre.")
-async def blinfo(ctx, member: discord.Member = None):
-    await ctx.send("ℹ️ Informations de Blacklist chargées.")
-
-# ==========================================
-#          COMMANDES OWNERS
-# ==========================================
-@bot.command(help="Verrouille l'envoi de messages dans le salon pour les membres.")
-async def cmute(ctx, *, reason=None):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send(f"{EMOJI_LOCK} Le salon a été rendu muet pour tous les membres.")
-
-@bot.command(help="Mute temporairement l'envoi de messages dans le salon.")
-async def tempcmute(ctx, time=None):
-    await ctx.send(f"⏱️ Salon muté pour une durée de `{time}`.")
-
-@bot.command(help="Restaure l'autorisation d'écrire dans le salon.")
-async def uncmute(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send("🔓 Le salon est de nouveau ouvert à tous.")
-
-@bot.command(help="Affiche la liste complète des membres actuellement mutés.")
-async def mutelist(ctx):
-    await ctx.send("📋 **Liste des mutés :** Aucun membre muté actuellement.")
-
-@bot.command(help="Démute simultanément l'ensemble des membres du serveur.")
-async def unmuteall(ctx):
-    await ctx.send("🔊 Tous les membres du serveur ont été unmutés.")
-
-@bot.command(help="Verrouille l'accès et l'écriture dans le salon courant.")
-async def lock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send(f"{EMOJI_LOCK} Salon verrouillé.")
-
-@bot.command(help="Déverrouille l'accès et l'écriture dans le salon courant.")
-async def unlock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send("🔓 Salon déverrouillé.")
-
-@bot.command(help="Verrouille simultanément l'intégralité des salons du serveur.")
-async def lockall(ctx):
-    await ctx.send(f"{EMOJI_LOCK} Tous les salons du serveur ont été verrouillés.")
-
-@bot.command(help="Déverrouille simultanément tous les salons du serveur.")
-async def unlockall(ctx):
-    await ctx.send("🔓 Tous les salons du serveur ont été déverrouillés.")
-
-@bot.command(help="Masque le salon courant aux yeux des membres.")
-async def hide(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=False)
-    await ctx.send("👁️‍🗨️ Salon masqué.")
-
-@bot.command(help="Rend à nouveau le salon courant visible aux membres.")
-async def unhide(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, view_channel=True)
-    await ctx.send("👁️ Salon affiché.")
-
-@bot.command(help="Masque l'intégralité des salons du serveur.")
-async def hideall(ctx):
-    await ctx.send("👁️‍🗨️ Tous les salons du serveur ont été masqués.")
-
-@bot.command(help="Rend à nouveau visibles tous les salons du serveur.")
-async def unhideall(ctx):
-    await ctx.send("👁️ Tous les salons ont été réaffichés.")
-
-@bot.command(help="Affiche la configuration complète et le statut des protections du bot.")
-async def settings(ctx):
-    status_antilink = "Activé" if config["antilink"] else "Désactivé"
-    status_antispam = "Activé" if config["antispam"] else "Désactivé"
-    welcome = f"<#{config['welcome_channel']}>" if config['welcome_channel'] else "Non configuré"
-    autorole = f"<@&{config['auto_role']}>" if config['auto_role'] else "Non configuré"
-    soutien = f"`{config['soutien_text']}`" if config['soutien_text'] else "Non configuré"
-    
-    await ctx.send(
-        f"⚙️ **Configuration Actuelle :**\n"
-        f"- Anti-link : `{status_antilink}`\n"
-        f"- Anti-spam : `{status_antispam}`\n"
-        f"- Salon d'accueil : {welcome}\n"
-        f"- Auto Role : {autorole}\n"
-        f"- Tag/Statut Soutien : {soutien}"
+    if membre.id in data["antimute"]:
+        await proteger_contre_mute(membre, avant, apres)
+    if avant.channel and avant.channel != apres.channel:
+        await nettoyer(avant.channel)
+    if apres.channel and apres.channel != avant.channel:
+        await suivre(membre, apres.channel)
+        if guilde(membre.guild.id)["generator"] == apres.channel.id:
+            await creer_temp(membre, apres.channel)
+
+
+# ---------- Panneau de gestion ----------
+def temp_du_clic(interaction: discord.Interaction):
+    """Retourne (salon, erreur) : le vocal temporaire où se trouve la personne qui clique."""
+    membre = interaction.user
+    if not membre.voice or not membre.voice.channel:
+        return None, "Rejoins ton salon vocal temporaire pour utiliser le panneau."
+    salon = membre.voice.channel
+    proprio = guilde(interaction.guild.id)["temp"].get(str(salon.id))
+    if proprio is None:
+        return None, "Ce salon n'est pas un vocal temporaire."
+    if proprio != membre.id and not est_owner(membre):
+        return None, "Seul le propriétaire du salon peut faire ça."
+    return salon, None
+
+
+class RenommerModal(discord.ui.Modal, title="Renommer le salon"):
+    nom = discord.ui.TextInput(label="Nouveau nom", max_length=100)
+
+    def __init__(self, salon_id: int):
+        super().__init__()
+        self.salon_id = salon_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        salon = interaction.guild.get_channel(self.salon_id)
+        if salon is None:
+            return await interaction.response.send_message("Salon introuvable.", ephemeral=True)
+        await salon.edit(name=self.nom.value)
+        await interaction.response.send_message("Salon renommé ✅", ephemeral=True)
+
+
+class Panneau(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _modifier(self, interaction: discord.Interaction, texte: str, **kwargs):
+        salon, erreur = temp_du_clic(interaction)
+        if erreur:
+            return await interaction.response.send_message(erreur, ephemeral=True)
+        await salon.set_permissions(interaction.guild.default_role, **kwargs)
+        await interaction.response.send_message(f"{texte} ✅", ephemeral=True)
+
+    @discord.ui.button(label="Verrouiller", emoji=EMOJI_VERROUILLER, style=discord.ButtonStyle.secondary)
+    async def verrouiller(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._modifier(interaction, "Salon verrouillé", connect=False)
+
+    @discord.ui.button(label="Déverrouiller", emoji=EMOJI_DEVERROUILLER, style=discord.ButtonStyle.secondary)
+    async def deverrouiller(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._modifier(interaction, "Salon déverrouillé", connect=None)
+
+    @discord.ui.button(label="Cacher", emoji=EMOJI_CACHER, style=discord.ButtonStyle.secondary)
+    async def cacher(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._modifier(interaction, "Salon caché", view_channel=False)
+
+    @discord.ui.button(label="Afficher", emoji=EMOJI_AFFICHER, style=discord.ButtonStyle.secondary)
+    async def afficher(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._modifier(interaction, "Salon affiché", view_channel=None)
+
+    @discord.ui.button(label="Renommer", emoji=EMOJI_RENOMMER, style=discord.ButtonStyle.primary)
+    async def renommer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        salon, erreur = temp_du_clic(interaction)
+        if erreur:
+            return await interaction.response.send_message(erreur, ephemeral=True)
+        await interaction.response.send_modal(RenommerModal(salon.id))
+
+
+# ---------- Commande : panneau (posté dans le salon texte) ----------
+@bot.command(name="panneau")
+@requis("panneau")
+async def panneau(ctx):
+    embed = discord.Embed(
+        title=f"{EMOJI_VERROUILLER} Panneau de gestion vocal",
+        description=(
+            "Rejoins ton salon vocal temporaire, puis utilise les boutons ci-dessous "
+            "pour le gérer."
+        ),
+        color=0x33C6FF,
     )
+    await ctx.send(embed=embed, view=Panneau())
 
-@bot.command(help="Active ou désactive la sécurité Anti-spam (`+antispam on/off`).")
-async def antispam(ctx, status=None):
-    if status in ["on", "off"]:
-        config["antispam"] = (status == "on")
-        await ctx.send(f"{EMOJI_SHIELD} Anti-spam configuré sur : **{status.upper()}**")
-    else:
-        await ctx.send("Usage : `+antispam on` ou `+antispam off`")
 
-@bot.command(help="Active ou désactive la suppression automatique des liens (`+antilink on/off`).")
-async def antilink(ctx, status: str = None):
-    if not status:
-        current = "activé" if config["antilink"] else "désactivé"
-        return await ctx.send(f"L'anti-link est actuellement **{current}**. Utilisez `+antilink on` ou `+antilink off`.")
-    
-    if status.lower() in ["on", "enable", "1", "true"]:
-        config["antilink"] = True
-        await ctx.send(f"{EMOJI_STAR} **Anti-link activé** ! Tous les liens seront automatiquement supprimés.")
-    elif status.lower() in ["off", "disable", "0", "false"]:
-        config["antilink"] = False
-        await ctx.send(f"{EMOJI_XCX} **Anti-link désactivé**.")
-    else:
-        await ctx.send("Usage : `+antilink on` ou `+antilink off`.")
-
-@bot.command(help="Gère la liste des mots interdits filtrés par le bot.")
-async def badwords(ctx, action=None):
-    await ctx.send("🤬 Gestionnaire de mots interdits actif.")
-
-@bot.command(help="Affiche la liste de tous les bots enregistrés sur le serveur.")
-async def allbots(ctx):
-    bots = [m.mention for m in ctx.guild.members if m.bot]
-    await ctx.send(f"🤖 **Bots du serveur ({len(bots)}) :**\n" + ", ".join(bots))
-
-@bot.command(help="Affiche la liste de tous les administrateurs du serveur.")
-async def alladmins(ctx):
-    admins = [m.mention for m in ctx.guild.members if m.guild_permissions.administrator and not m.bot]
-    await ctx.send(f"{EMOJI_CROWN} **Administrateurs ({len(admins)}) :**\n" + ", ".join(admins))
-
-@bot.command(help="Affiche la liste de tous les membres soutenant le serveur avec un Boost.")
-async def boosters(ctx):
-    boosters_list = [m.mention for m in ctx.guild.premium_subscribers]
-    if boosters_list:
-        await ctx.send(f"{EMOJI_NITRO} **Boosters ({len(boosters_list)}) :**\n" + ", ".join(boosters_list))
-    else:
-        await ctx.send(f"{EMOJI_NITRO} Aucun booster sur ce serveur actuellement.")
-
-@bot.command(help="Affiche les statistiques et informations détaillées du serveur.")
-async def serverinfo(ctx):
-    guild = ctx.guild
-    embed = discord.Embed(title=f"Informations sur {guild.name}", color=discord.Color.purple())
-    embed.add_field(name="Membres", value=str(guild.member_count), inline=True)
-    embed.add_field(name="Créé le", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
-    embed.add_field(name="Propriétaire", value=guild.owner.mention if guild.owner else "Inconnu", inline=True)
-    if guild.icon:
-        embed.set_thumbnail(url=guild.icon.url)
+@bot.command(name="help")
+async def help_cmd(ctx):
+    embed = discord.Embed(
+        title=f"{EMOJI_CACHER} VoiceMaster · aide",
+        description=f"Préfixe : `{data['prefix']}`",
+        color=0x33C6FF,
+    )
+    for titre, lignes in COMMANDES:
+        embed.add_field(
+            name=titre,
+            value="\n".join(f"`{cmd}` : {desc}" for cmd, desc in lignes),
+            inline=False,
+        )
+    base_url = os.environ.get("RENDER_EXTERNAL_URL")
+    if base_url:
+        embed.set_image(url=f"{base_url}/static/aide.png")
     await ctx.send(embed=embed)
 
-# ==========================================
-#          MENU D'AIDE (MENU DÉROULANT)
-# ==========================================
-class HelpSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="Commandes Publiques", description="Liste et description des commandes publiques", emoji="🌐"),
-            discord.SelectOption(label="Perm 1 à 3", description="Liste et description des commandes Perm 1-3", emoji="🛡️"),
-            discord.SelectOption(label="Perm 4 à 6", description="Liste et description des commandes Perm 4-6", emoji="⚖️"),
-            discord.SelectOption(label="Perm 7 à 9", description="Liste et description des commandes Perm 7-9", emoji="🔨"),
-            discord.SelectOption(label="Owners & Config", description="Liste et description des commandes de configuration & Owners", emoji="⚙️")
-        ]
-        super().__init__(placeholder="📂 Choisissez une catégorie...", min_values=1, max_values=1, options=options)
 
-    async def callback(self, interaction: discord.Interaction):
-        if self.values[0] == "Commandes Publiques":
-            embed = discord.Embed(
-                title="🌐 Commandes Publiques",
-                description=(
-                    "`+crowbots` - Affiche la liste des bots publics du système.\n"
-                    "`+mybots` - Affiche la liste de vos bots enregistrés.\n"
-                    "`+pic` - Affiche la photo de profil d'un membre ou la vôtre.\n"
-                    "`+banner` - Affiche la bannière d'un membre s'il en possède une.\n"
-                    "`+server pic/banner` - Affiche l'icône ou la bannière du serveur.\n"
-                    "`+emoji` - Affiche l'image d'un emoji personnalisé en grand.\n"
-                    "`+image` - Traite ou envoie une image.\n"
-                    "`+suggestion` - Soumet une suggestion dans le salon dédié.\n"
-                    "`+lb suggestions` - Affiche le classement des suggestions.\n"
-                    "`+wiki` - Recherche un sujet Wikipédia et affiche un résumé.\n"
-                    "`+search wiki` - Effectue une recherche complète sur Wikipédia.\n"
-                    "`+calc` - Effectue un calcul mathématique basique.\n"
-                    "`+ping` - Affiche la latence du bot en millisecondes.\n"
-                    "`+speed` - Affiche la vitesse du serveur d'hébergement.\n"
-                    "`+message` - Fait répéter un message au bot.\n"
-                    "`+say` - Fait parler le bot à votre place."
-                ),
-                color=discord.Color.blue()
-            )
-        elif self.values[0] == "Perm 1 à 3":
-            embed = discord.Embed(
-                title="🛡️ Commandes Perm 1 à 3",
-                description=(
-                    "**Perm 1:**\n"
-                    "`+sanctions` - Historique des sanctions d'un membre.\n"
-                    "`+note` - Ajouter une note de modération privée.\n"
-                    "`+delnote` - Supprimer une note via son ID.\n"
-                    "`+mute` - Rendre un membre muet.\n"
-                    "`+tempmute` - Rendre un membre muet temporairement.\n"
-                    "`+perms` - Afficher le niveau de permission d'un membre.\n"
-                    "`+snipe` - Récupérer le dernier message supprimé.\n\n"
-                    "**Perm 2:**\n"
-                    "`+voicekick` - Expulser un membre d'un salon vocal.\n\n"
-                    "**Perm 3:**\n"
-                    "`+warn` - Envoyer un avertissement formel.\n"
-                    "`+antihack` - Activer/Désactiver le système anti-hack."
-                ),
-                color=discord.Color.green()
-            )
-        elif self.values[0] == "Perm 4 à 6":
-            embed = discord.Embed(
-                title="⚖️ Commandes Perm 4 à 6",
-                description=(
-                    "**Perm 4:**\n"
-                    "`+nick` - Modifier le surnom d'un membre.\n\n"
-                    "**Perm 5:**\n"
-                    "`+del` - Supprimer une sanction enregistrée via son ID.\n"
-                    "`+clear` - Purger un nombre de messages dans le salon.\n"
-                    "`+unmute` - Restaurer la parole d'un membre muet.\n\n"
-                    "**Perm 6:**\n"
-                    "`+addrole` - Ajouter un rôle à un membre.\n"
-                    "`+delrole` - Retirer un rôle à un membre."
-                ),
-                color=discord.Color.orange()
-            )
-        elif self.values[0] == "Perm 7 à 9":
-            embed = discord.Embed(
-                title="🔨 Commandes Perm 7 à 9",
-                description=(
-                    "**Perm 7:**\n"
-                    "`+clearsanctions` - Effacer toutes les sanctions d'un membre.\n"
-                    "`+kick` - Expulser un membre du serveur.\n"
-                    "`+banlist` - Afficher la liste des membres bannis.\n\n"
-                    "**Perm 8:**\n"
-                    "`+ban` - Bannir un membre du serveur.\n"
-                    "`+tempban` - Bannir un membre temporairement.\n"
-                    "`+unban` - Débannir un membre via son ID.\n"
-                    "`+derank` - Retirer les rôles de modération d'un membre.\n"
-                    "`+lockname` - Verrouiller le pseudo d'un membre.\n"
-                    "`+unlockname` - Déverrouiller le pseudo d'un membre.\n"
-                    "`+locknamelist` - Afficher la liste des pseudos verrouillés.\n"
-                    "`+blrank` - Afficher le niveau de rang de blacklist.\n\n"
-                    "**Perm 9:**\n"
-                    "`+bl` - Ajouter un membre à la Blacklist du bot.\n"
-                    "`+unbl` - Retirer un membre de la Blacklist.\n"
-                    "`+blinfo` - Afficher les infos de blacklist."
-                ),
-                color=discord.Color.red()
-            )
-        elif self.values[0] == "Owners & Config":
-            embed = discord.Embed(
-                title="⚙️ Commandes Owners & Configuration",
-                description=(
-                    "**Configuration :**\n"
-                    "`+setwelcome` - Définir le salon d'arrivée des membres.\n"
-                    "`+setautorole` - Définir le rôle attribué à l'arrivée.\n"
-                    "`+setsoutien` - Configurer le rôle pour Tag/Statut/Boost.\n\n"
-                    "**Gestion des Salons :**\n"
-                    "`+cmute` / `+uncmute` - Muter / Démuter le salon courant.\n"
-                    "`+tempcmute` - Muter le salon temporairement.\n"
-                    "`+lock` / `+unlock` - Verrouiller / Déverrouiller le salon.\n"
-                    "`+lockall` / `+unlockall` - Verrouiller / Déverrouiller tous les salons.\n"
-                    "`+hide` / `+unhide` - Masquer / Afficher le salon.\n"
-                    "`+hideall` / `+unhideall` - Masquer / Afficher tous les salons.\n\n"
-                    "**Administration :**\n"
-                    "`+settings` - Afficher les paramètres actuels du bot.\n"
-                    "`+antispam` - Configurer la sécurité Anti-spam (`on/off`).\n"
-                    "`+antilink` - Configurer la sécurité Anti-link (`on/off`).\n"
-                    "`+badwords` - Gérer les mots interdits.\n"
-                    "`+allbots` - Liste complète des bots du serveur.\n"
-                    "`+alladmins` - Liste de tous les administrateurs.\n"
-                    "`+boosters` - Liste des boosters du serveur.\n"
-                    "`+serverinfo` - Informations détaillées sur le serveur."
-                ),
-                color=discord.Color.gold()
-            )
-        await interaction.response.edit_message(embed=embed)
+# ---------- Commandes : whitelist ----------
+@bot.command(name="setup")
+@requis("setup")
+async def setup(ctx, salon: discord.VoiceChannel):
+    guilde(ctx.guild.id)["generator"] = salon.id
+    sauver()
+    await ctx.send(f"Salon générateur défini sur **{salon.name}**.")
 
-class HelpView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=180)
-        self.add_item(HelpSelect())
 
-@bot.command(help="Affiche le menu d'aide interactif avec un menu déroulant.")
-async def help(ctx, *, command_name=None):
-    if command_name:
-        cmd = bot.get_command(command_name)
-        if cmd:
-            embed = discord.Embed(
-                title=f"📖 Aide : +{cmd.name}",
-                description=cmd.help or "Aucune explication disponible.",
-                color=discord.Color.blue()
-            )
-            await ctx.send(embed=embed)
-        else:
-            await ctx.send(f"{EMOJI_XCX} La commande `+{command_name}` n'existe pas.")
+@bot.command(name="find")
+@requis("find")
+async def find(ctx, membre: discord.Member):
+    if not membre.voice or not membre.voice.channel:
+        return await ctx.send(f"{membre.display_name} n'est pas en vocal.")
+    await ctx.send(f"{membre.display_name} est dans {membre.voice.channel.mention}.")
+
+
+@bot.command(name="bringall")
+@requis("bringall")
+async def bringall(ctx):
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        return await ctx.send("Tu dois être dans un salon vocal.")
+    cible = ctx.author.voice.channel
+    total = 0
+    for salon in ctx.guild.voice_channels:
+        if salon == cible:
+            continue
+        for membre in list(salon.members):
+            if membre.bot:
+                continue
+            try:
+                await membre.move_to(cible)
+                total += 1
+                await asyncio.sleep(DELAI)
+            except discord.HTTPException:
+                pass
+    await ctx.send(f"{total} membre(s) ramené(s) dans {cible.mention}.")
+
+
+@bot.command(name="bringcc")
+@requis("bringcc")
+async def bringcc(ctx, source: discord.CategoryChannel, cible: discord.CategoryChannel):
+    salons_cible = cible.voice_channels
+    if not salons_cible:
+        return await ctx.send("La catégorie cible n'a aucun salon vocal.")
+    membres = [m for s in source.voice_channels for m in s.members if not m.bot]
+    for i, membre in enumerate(membres):
+        try:
+            await membre.move_to(salons_cible[i % len(salons_cible)])
+            await asyncio.sleep(DELAI)
+        except discord.HTTPException:
+            pass
+    await ctx.send(f"{len(membres)} membre(s) réparti(s) sur {len(salons_cible)} salon(s).")
+
+
+@bot.command(name="wakeup")
+@requis("wakeup")
+async def wakeup(ctx, membre: discord.Member = None):
+    if membre is None:
+        return await ctx.send(f"Usage : `{data['prefix']}wakeup @membre`")
+    if not membre.voice or not membre.voice.channel:
+        return await ctx.send(f"{membre.display_name} n'est pas en vocal.")
+    if membre.id in wakeup_en_cours:
+        return await ctx.send(f"Un wakeup est déjà en cours pour {membre.display_name}.")
+
+    origine = membre.voice.channel
+    wakeup_en_cours.add(membre.id)
+    try:
+        for salon in ctx.guild.voice_channels:
+            if not membre.voice or not membre.voice.channel:
+                break
+            try:
+                await membre.move_to(salon)
+            except discord.HTTPException:
+                continue
+            await asyncio.sleep(DELAI_WAKEUP)
+
+        if membre.voice and membre.voice.channel:
+            retour = ctx.guild.get_channel(origine.id)
+            if retour:
+                await membre.move_to(retour)
+
+        await ctx.send(f"Wakeup terminé pour {membre.mention} ✅")
+    except discord.Forbidden:
+        await ctx.send("Je n'ai pas la permission de déplacer ce membre.")
+    finally:
+        wakeup_en_cours.discard(membre.id)
+
+
+# ---------- Commandes : outils vocaux ----------
+@bot.command(name="mv")
+@requis("mv")
+async def mv(ctx, membre: discord.Member):
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        return await ctx.send("Tu dois être dans un salon vocal.")
+    if not membre.voice or not membre.voice.channel:
+        return await ctx.send(f"{membre.display_name} n'est pas en vocal.")
+    await membre.move_to(ctx.author.voice.channel)
+
+
+@bot.command(name="join")
+@requis("join")
+async def join(ctx, membre: discord.Member):
+    if not membre.voice or not membre.voice.channel:
+        return await ctx.send(f"{membre.display_name} n'est pas en vocal.")
+    await ctx.author.move_to(membre.voice.channel)
+
+
+@bot.command(name="follow")
+@requis("follow")
+async def follow(ctx, membre: discord.Member):
+    suivis[membre.id] = ctx.author.id
+    if ctx.author.voice and ctx.author.voice.channel:
+        try:
+            await membre.move_to(ctx.author.voice.channel)
+        except discord.HTTPException:
+            pass
+    await ctx.send(f"{membre.display_name} te suit maintenant de salon en salon.")
+
+
+@bot.command(name="unfollow")
+@requis("unfollow")
+async def unfollow(ctx, membre: discord.Member):
+    if suivis.pop(membre.id, None) is None:
+        return await ctx.send(f"{membre.display_name} ne te suivait pas.")
+    await ctx.send(f"{membre.display_name} ne te suit plus.")
+
+
+# ---------- Commandes : owner ----------
+@bot.command(name="owner")
+@owner_only()
+async def owner(ctx, membre: discord.Member):
+    if membre.id in data["owners"]:
+        data["owners"].remove(membre.id)
+        msg = f"{membre.display_name} n'est plus owner."
     else:
-        embed = discord.Embed(
-            title=f"{EMOJI_CROWN} Menu d'aide interactif - Gstion {EMOJI_NITRO}",
-            description="Sélectionnez une catégorie dans le menu déroulant ci-dessous pour afficher les commandes avec leur description complète.",
-            color=discord.Color.blue()
+        data["owners"].append(membre.id)
+        msg = f"{membre.display_name} est maintenant owner."
+    sauver()
+    await ctx.send(msg)
+
+
+@bot.command(name="unowner")
+@owner_only()
+async def unowner(ctx, *, cible: str = None):
+    if not cible:
+        return await ctx.send("Usage : `=unowner @membre` ou `=unowner all`.")
+    if cible.strip().lower() == "all":
+        total = len(data["owners"])
+        data["owners"].clear()
+        sauver()
+        return await ctx.send(f"{total} owner(s) retiré(s).")
+    if not ctx.message.mentions:
+        return await ctx.send("Mentionne la personne : `=unowner @membre`.")
+    membre = ctx.message.mentions[0]
+    if membre.id in data["owners"]:
+        data["owners"].remove(membre.id)
+        sauver()
+        return await ctx.send(f"{membre.display_name} n'est plus owner.")
+    await ctx.send(f"{membre.display_name} n'est pas owner.")
+
+
+@bot.command(name="antimute")
+@owner_only()
+async def antimute(ctx, membre: discord.Member = None):
+    membre = membre or ctx.author
+    if membre.id in data["antimute"]:
+        data["antimute"].remove(membre.id)
+        msg = f"Protection anti-mute retirée pour {membre.display_name}."
+    else:
+        data["antimute"].append(membre.id)
+        msg = (
+            f"Protection anti-mute activée pour {membre.display_name}. "
+            "Le bot annule automatiquement un mute ou un sourdine serveur."
         )
-        embed.set_footer(text="Bot gstion • Utilisez le menu déroulant pour changer de catégorie.")
-        await ctx.send(embed=embed, view=HelpView())
+    sauver()
+    await ctx.send(msg)
 
-# ==========================================
-#            LANCEMENT DU BOT
-# ==========================================
-if __name__ == "__main__":
-    keep_alive()
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        print("ERREUR : La variable d'environnement DISCORD_TOKEN n'a pas été trouvée sur Render !")
+
+@bot.command(name="wl")
+@owner_only()
+async def wl(ctx, membre: discord.Member):
+    g = guilde(ctx.guild.id)
+    if membre.id in g["whitelist"]:
+        g["whitelist"].remove(membre.id)
+        msg = f"{membre.display_name} retiré de la whitelist."
     else:
-        bot.run(token)
+        g["whitelist"].append(membre.id)
+        msg = f"{membre.display_name} ajouté à la whitelist."
+    sauver()
+    await ctx.send(msg)
+
+
+@bot.command(name="perm")
+@owner_only()
+async def perm(ctx, commande: str = None, niveau_voulu: str = None):
+    if commande is None:
+        lignes = [f"`{c}` : {niveau(ctx.guild, c)}" for c in NIVEAUX_PAR_DEFAUT]
+        return await ctx.send("**Niveaux requis** (all / wl / owner) :\n" + "\n".join(lignes))
+    if commande not in NIVEAUX_PAR_DEFAUT or niveau_voulu not in ("all", "wl", "owner"):
+        return await ctx.send("Usage : `=perm <commande> <all|wl|owner>`")
+    guilde(ctx.guild.id)["perms"][commande] = niveau_voulu
+    sauver()
+    await ctx.send(f"`{commande}` nécessite maintenant : **{niveau_voulu}**.")
+
+
+@bot.command(name="prefix")
+@owner_only()
+async def prefix(ctx, nouveau: str):
+    data["prefix"] = nouveau
+    sauver()
+    await ctx.send(f"Préfixe changé en `{nouveau}`.")
+
+
+@bot.command(name="perso")
+@owner_only()
+async def perso(ctx, champ: str, *, valeur: str = None):
+    if champ == "nom" and valeur:
+        await bot.user.edit(username=valeur)
+    elif champ == "statut" and valeur:
+        await bot.change_presence(activity=discord.CustomActivity(name=valeur))
+    elif champ == "avatar" and ctx.message.attachments:
+        image = await ctx.message.attachments[0].read()
+        await bot.user.edit(avatar=image)
+    else:
+        return await ctx.send("Usage : `=perso nom <texte>`, `=perso statut <texte>` ou `=perso avatar` (avec image).")
+    await ctx.send("Mis à jour ✅")
+
+
+# ---------- Gestion des erreurs ----------
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CheckFailure):
+        msg = str(error) or "Permission refusée."
+    elif isinstance(error, (commands.MissingRequiredArgument, commands.BadArgument)):
+        msg = f"Utilisation incorrecte ou élément introuvable. Essaie `{ctx.prefix}{ctx.command}`."
+    elif isinstance(error, discord.Forbidden):
+        msg = "Il me manque une permission Discord pour faire ça."
+    else:
+        print(f"Erreur sur {ctx.command}: {error}")
+        msg = "Une erreur est survenue."
+    await ctx.send(msg, delete_after=8)
+
+
+# ---------- Lancement ----------
+keep_alive()
+bot.run(TOKEN)
